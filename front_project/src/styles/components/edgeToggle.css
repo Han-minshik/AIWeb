@@ -1,0 +1,64 @@
+:root {
+  --edge-top: 8px;
+}
+
+.edge-toggle.right {
+  position: absolute;
+  top: 6px;
+  right: 8px;
+  z-index: 10;
+  width: 40px;
+  height: 40px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  pointer-events: auto;
+  color: inherit;
+  transform: none;
+  margin-bottom: 0;
+  border: none;
+  background: none;
+  transition:
+    background-color 0.15s ease,
+    border-color 0.15s ease,
+    box-shadow 0.15s ease,
+    transform 0.12s ease,
+    color 0.12s ease,
+    opacity 0.12s ease;
+}
+
+.edge-toggle.right img {
+  width: 22px;
+  height: 22px;
+}
+
+[data-theme="dark"] .edge-toggle.right img {
+  filter: brightness(0) saturate(100%) invert(1) contrast(120%);
+}
+
+.edge-toggle.right:hover {
+  border-color: rgba(148, 163, 184, 0.8);
+  color: #4b5563;
+  transform: translateY(-1px);
+}
+
+.edge-toggle.right i.bi {
+  font-size: 18px;
+  line-height: 1;
+}
+
+.edge-toggle.right.open,
+.edge-toggle.right.closed {
+  opacity: 0.95;
+}
+
+
+@media (max-width: 480px) {
+  .edge-toggle.right {
+    right: calc(env(safe-area-inset-right, 0px) + 8px);
+    top: calc(var(--edge-top) + var(--app-topbar-h, 46px));
+    width: 36px;
+    height: 36px;
+  }
+}

@@ -1,0 +1,93 @@
+.ddm-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.35);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+}
+
+.ddm-modal {
+  width: min(520px, 92vw);
+  background: var(--bg-elev);
+  color: var(--txt);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  box-shadow: var(--shadow-lg);
+  overflow: hidden;
+}
+
+.ddm-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 18px;
+  border-bottom: 1px solid var(--line);
+  color: var(--txt);
+}
+
+.ddm-title {
+  font-weight: 700;
+  font-size: 16px;
+}
+
+.ddm-close {
+  border: none;
+  background: transparent;
+  font-size: 20px;
+  cursor: pointer;
+  line-height: 1;
+  color: var(--muted);
+}
+.ddm-close:hover {
+  color: var(--txt);
+}
+
+.ddm-body {
+  padding: 16px 18px 18px;
+}
+
+.ddm-desc {
+  margin-bottom: 12px;
+  color: var(--txt);
+  opacity: 0.9;
+}
+
+.ddm-actions {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin: 6px 0 10px;
+}
+
+.ddm-btn {
+  border: 1px solid var(--line);
+  background: var(--bg-elev);
+  padding: 8px 12px;
+  border-radius: 8px;
+  cursor: pointer;
+  font-weight: 600;
+  color: var(--txt);
+}
+.ddm-btn:hover {
+  background: var(--hover);
+}
+
+.ddm-btn.danger {
+  background: var(--danger);
+  color: #fff;
+  border-color: var(--danger);
+}
+.ddm-btn.danger:hover {
+  filter: brightness(1.02);
+}
+
+.ddm-note {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+[data-theme="dark"] .ddm-backdrop {
+  background: rgba(0, 0, 0, 0.55);
+}

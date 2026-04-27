@@ -1,0 +1,161 @@
+.bookmarks-panel {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  background: var(--bg-2);
+}
+
+.bookmarks-panel .panel-head {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 10px;
+}
+
+.bookmarks-panel .panel-title {
+  font-weight: 600;
+  color: var(--text);
+}
+
+.bookmarks-panel .panel-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+}
+
+.bookmarks-panel .card.scroll {
+  flex: 1 1 auto;
+  min-height: 0;
+  border: none !important;
+}
+
+.bookmarks-panel .card.scroll.root-drop-over {
+  background: linear-gradient(180deg, rgba(0, 195, 255, 0.08), transparent 60%);
+  outline: 1px dashed rgba(0, 195, 255, 0.35);
+}
+
+.bookmarks-panel .tree {
+  list-style: none;
+  margin: 0;
+  padding: 4px 6px 8px 8px;
+  font-size: 15.2px;
+}
+
+.bookmarks-panel .tree .t-node {
+  display: grid;
+  grid-template-columns: 18px 1fr;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 4px;
+  border-radius: 6px;
+  user-select: none;
+  transition: background 0.12s ease, color 0.12s ease, outline 0.12s ease;
+}
+
+.bookmarks-panel .tree .t-node:hover {
+  background: #bae0ff;
+}
+
+.bookmarks-panel .tree .t-node.file-selected {
+  background: #bae0ff;
+  outline: 1px solid #979797;
+}
+
+.bookmarks-panel .tree .t-node.file-selected .label {
+  font-weight: 600;
+}
+
+.bookmarks-panel .tree .t-node.droppable-over {
+  background: rgba(0, 195, 255, 0.12);
+  outline: 1px dashed rgba(0, 195, 255, 0.45);
+}
+
+.bookmarks-panel .tree .t-node .twisty {
+  grid-column: 1;
+  width: 18px;
+  height: 18px;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  color: var(--muted);
+}
+
+.bookmarks-panel .tree .t-node .twisty img {
+  width: 14px;
+  height: 14px;
+  display: block;
+  opacity: 0.85;
+  pointer-events: none;
+  user-select: none;
+}
+
+.bookmarks-panel .tree .t-node:hover .twisty img {
+  opacity: 1;
+}
+
+[data-theme="dark"] .bookmarks-panel .tree .t-node .twisty img {
+  filter: brightness(0) saturate(100%) invert(1) contrast(120%);
+  opacity: 0.9;
+}
+
+.bookmarks-panel .tree .t-node .leaf {
+  grid-column: 2;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text);
+}
+
+.bookmarks-panel .tree .t-node .leaf .label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: unset;
+}
+
+.bookmarks-panel .tree .tree-children {
+  grid-column: 1 / -1;
+  list-style: none;
+  margin: 0 0 2px 10px;
+  padding-left: 0.1px;
+}
+
+.bookmarks-panel .tree,
+.bookmarks-panel .tree li {
+  list-style: none !important;
+}
+
+.bookmarks-panel .tree li::marker {
+  content: '' !important;
+}
+
+.bookmarks-panel .tree .t-node::before,
+.bookmarks-panel .tree .t-node::after,
+.bookmarks-panel .tree .t-node .leaf::before,
+.bookmarks-panel .tree .t-node .leaf::after,
+.bookmarks-panel .tree .t-node .label::before,
+.bookmarks-panel .tree .t-node .label::after,
+.bookmarks-panel .tree .t-node .twisty::before,
+.bookmarks-panel .tree .t-node .twisty::after {
+  content: none !important;
+  background: none !important;
+  -webkit-mask-image: none !important;
+  mask-image: none !important;
+}
+
+.bookmarks-panel .tree .t-node .twisty img::before,
+.bookmarks-panel .tree .t-node .twisty img::after,
+.bookmarks-panel .tree .t-node .leaf img::before,
+.bookmarks-panel .tree .t-node .leaf img::after {
+  content: none !important;
+  background: none !important;
+  -webkit-mask-image: none !important;
+  mask-image: none !important;
+}

@@ -1,0 +1,176 @@
+/* ===============================
+   token.css — Light (White & Gray) Theme Tokens
+   Single source of truth for colors, spacing, radius, shadows, z-index.
+   All component CSS should reference these variables only.
+   =============================== */
+
+:root {
+  /* Color Palette — Light */
+  --bg:            #ffffff;   /* base app background */
+  --bg-2:          #f7f7f8;   /* surfaces: panels, cards */
+  --bg-3:          #eeeeef;   /* hovers, selected, subtle fills */
+  --bg-elev:       #ffffff;   /* elevated surfaces: modals, menus */
+
+  --txt:           #111113;   /* primary text (near-black) */
+  --muted:         #6b6f76;   /* secondary text / icons */
+  --link:          #0b57d0;   /* link text (accessible on light) */
+
+  --line:          #e6e7ea;   /* borders, dividers */
+
+  /* Brand & Semantic */
+  --brand:         #2563eb;   /* primary brand (buttons, accents) */
+  --brand-strong:  #1d4ed8;
+  --brand-weak:    #e6eefc;
+
+  --ok:            #16a34a;
+  --ok-weak:       #e7f6ec;
+
+  --warn:          #ca8a04;
+  --warn-weak:     #fff7e6;
+
+  --danger:        #dc2626;
+  --danger-weak:   #fdeaea;
+
+  /* States */
+  --hover:         var(--bg-3);
+  --active:        #e2e3e6;
+  --disabled-txt:  #9aa0a6;
+  --disabled-bg:   #f2f3f5;
+  --focus-ring:    rgba(37, 99, 235, 0.35); /* brand focus outline */
+
+  /* Shadows (lighter on light theme) */
+  --shadow-sm:     0 1px 2px rgba(0, 0, 0, 0.06);
+  --shadow-md:     0 4px 12px rgba(0, 0, 0, 0.08);
+  --shadow-lg:     0 10px 24px rgba(0, 0, 0, 0.12);
+
+  /* Radii */
+  --r-2xs: 4px;
+  --r-xs:  6px;
+  --r-sm:  8px;
+  --r-md:  12px;
+  --r-lg:  16px;
+  --r-xl:  20px;
+  --r-2xl: 24px;
+
+  /* Spacing scale */
+  --sp-2xs: 2px;
+  --sp-xs:  4px;
+  --sp-sm:  8px;
+  --sp-md:  12px;
+  --sp-lg:  16px;
+  --sp-xl:  20px;
+  --sp-2xl: 24px;
+  --sp-3xl: 32px;
+
+  /* Typography */
+  --font-sans: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Noto Sans, Apple SD Gothic Neo, "Malgun Gothic", "Apple Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol", sans-serif;
+  --fs-12: 12px;
+  --fs-13: 13px;
+  --fs-14: 14px;
+  --fs-16: 16px;
+  --fs-18: 18px;
+
+  /* Layout helpers */
+  --container-max: 1280px;
+
+  /* Z-index scale */
+  --z-docked:  5;
+  --z-sticky:  10;
+  --z-dropdown: 1000;
+  --z-overlay:  1100;
+  --z-modal:    1200;
+  --z-toast:    1300;
+
+  /* UI component tokens */
+  --chip-bg:     var(--bg-3);
+  --chip-br:     var(--line);
+  --chip-txt:    var(--muted);
+
+  --sb-thumb:        #c1c1c1;
+  --sb-thumb-hover:  #a8a8a8;
+  --sb-thumb-active: #909090;
+  --sb-track:        #f1f1f1;
+}
+
+/* Optional: high-contrast mode adjustments */
+@media (forced-colors: active) {
+  :root {
+    --line: GrayText;
+    --focus-ring: Highlight;
+  }
+}
+
+/* Utility tokens mapped to common aliases used across legacy CSS */
+:root {
+  /* Legacy aliases (keep for compatibility with existing files) */
+  --bg-app:      var(--bg);     /* used by Main.css */
+  --panel:       var(--bg-2);
+  --panel-2:     var(--bg-3);
+  --text:        var(--txt);
+  --text-muted:  var(--muted);
+  --border:      var(--line);
+
+  /* Table specific */
+  --table-row:        var(--bg);
+  --table-row-alt:    var(--bg-2);
+  --table-row-hover:  var(--bg-3);
+  --table-border:     var(--line);
+
+  /* Inputs */
+  --input-bg:         var(--bg-elev);
+  --input-border:     var(--line);
+  --input-placeholder: var(--muted);
+  --input-focus:      var(--focus-ring);
+}
+
+/* Dark theme overrides */
+[data-theme="dark"] {
+  --bg:            #0f1115;
+  --bg-2:          #151922;
+  --bg-3:          #1d2330;
+  --bg-elev:       #1a1f2b;
+
+  --txt:           #e6e8ee;
+  --muted:         #9aa4b2;
+  --link:          #7ab5ff;
+
+  --line:          #2a3140;
+
+  --brand:         #5b8cff;
+  --brand-strong:  #3f6fe0;
+  --brand-weak:    #1e2a44;
+
+  --ok:            #34d399;
+  --ok-weak:       #0f2a1f;
+
+  --warn:          #fbbf24;
+  --warn-weak:     #2a210c;
+
+  --danger:        #f87171;
+  --danger-weak:   #2b1111;
+
+  --hover:         #232a38;
+  --active:        #2a3242;
+  --disabled-txt:  #6b7280;
+  --disabled-bg:   #1c222e;
+  --focus-ring:    rgba(91, 140, 255, 0.45);
+
+  --shadow-sm:     0 1px 2px rgba(0, 0, 0, 0.4);
+  --shadow-md:     0 4px 12px rgba(0, 0, 0, 0.5);
+  --shadow-lg:     0 10px 24px rgba(0, 0, 0, 0.6);
+
+  --chip-bg:       var(--bg-3);
+  --chip-br:       var(--line);
+  --chip-txt:      var(--muted);
+
+  --sb-thumb:        #3b4455;
+  --sb-thumb-hover:  #4b5569;
+  --sb-thumb-active: #5b667c;
+  --sb-track:        #1a1f2b;
+}
+
+/* Base selection color tuned for light theme */
+::selection {
+  background: var(--brand-weak);
+  color: var(--txt);
+}

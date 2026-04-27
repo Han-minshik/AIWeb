@@ -1,0 +1,67 @@
+version: "3.9"
+
+services:
+  db:
+    image: mysql:8.0
+    container_name: db
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-rootpass}
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-obsidian_db_2}
+      MYSQL_USER: ${MYSQL_USER:-appuser}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-app_pass_1234!}
+      TZ: ${TZ:-Asia/Seoul}
+    ports:
+      - "3306:3306"
+    volumes:
+      - db_data:/var/lib/mysql
+      - ./db/init:/docker-entrypoint-initdb.d:ro
+    command:
+      - "--default-authentication-plugin=mysql_native_password"
+      - "--character-set-server=utf8mb4"
+      - "--collation-server=utf8mb4_unicode_ci"
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-uroot", "-p${MYSQL_ROOT_PASSWORD}"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  back:
+    build:
+      context: ./back_project
+      dockerfile: Dockerfile
+    container_name: back
+    restart: unless-stopped
+    env_file:
+      - ./.env
+    environment:
+      TZ: ${TZ:-Asia/Seoul}
+      APP_PORT: ${APP_PORT:-8001}
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "${APP_PORT:-8001}:${APP_PORT:-8001}"
+    volumes:
+      - ./back_project/uploads:/app/uploads
+      - ./back_project/logs:/app/logs
+      - D:/storage/base_files:/storage/base_files
+      - D:/storage/extract:/storage/extract
+
+  front:
+    build:
+      context: ./front_project
+      dockerfile: Dockerfile
+    container_name: front
+    restart: unless-stopped
+    depends_on:
+      - back
+    ports:
+      - "3000:3000"
+    environment:
+      TZ: ${TZ:-Asia/Seoul}
+      CHOKIDAR_USEPOLLING: "true"
+      WATCHPACK_POLLING: "true"
+
+volumes:
+  db_data:

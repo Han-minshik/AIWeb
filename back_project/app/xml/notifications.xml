@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mapper namespace="notifications">
+  <query id="list_notifications"><![CDATA[
+SELECT id, user_id, kind, severity, title, created_at, read_at
+FROM notifications
+WHERE user_id=%s AND (%s=0 OR read_at IS NULL)
+ORDER BY created_at DESC
+  ]]></query>
+
+  <query id="unread_count"><![CDATA[
+SELECT COUNT(*) AS cnt
+FROM notifications
+WHERE user_id=%s AND read_at IS NULL
+  ]]></query>
+
+  <query id="mark_read_prefix"><![CDATA[
+UPDATE notifications
+SET read_at=NOW()
+WHERE user_id=%s AND id IN
+  ]]></query>
+
+  <query id="insert_notification"><![CDATA[
+INSERT INTO notifications (user_id, kind, title, body, severity)
+VALUES (%s,'system',%s,%s,%s)
+  ]]></query>
+</mapper>
+

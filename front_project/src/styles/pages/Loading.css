@@ -1,0 +1,5 @@
+.loading-root{width:100%;height:100vh;background:#0c0f14;display:grid;place-content:center;gap:24px;padding:0 96px}
+.loading-title{color:var(--muted);font-size:var(--fs-18);text-align:center}
+.loading-bar-wrap{align-self:stretch;height:10px;position:relative;overflow:hidden;border-radius:4px}
+.loading-bar-fill{position:absolute;left:50%;transform:translateX(-245px);width:490px;height:10px;background:var(--accent)}
+.loading-bar-track{position:absolute;inset:0;background:var(--accent);opacity:.35}

@@ -1,0 +1,143 @@
+/* =========================================
+   menu.css  (HamburgerMenu + UserProfile dropdown)
+   - 항상 라이트 톤으로 고정
+   ========================================= */
+
+/* -------------------------------
+   HamburgerMenu (kb-menu*)
+   ------------------------------- */
+.kb-menu {
+  position: fixed !important;   /* 사이드바/헤더 영향 제거 */
+  top: 56px;
+  left: 16px;
+  z-index: 2147483647 !important;
+
+  min-width: 208px;
+  max-height: calc(100vh - 96px);
+  overflow-y: auto;
+
+  background: var(--bg-elev) !important;
+  color: var(--txt) !important;
+  border: 1px solid var(--line) !important;
+  border-radius: 12px;
+  box-shadow: var(--shadow-lg);
+
+  transform: translateY(-4px);
+  animation: kbMenuFade 140ms ease-out forwards;
+}
+
+@keyframes kbMenuFade {
+  to { transform: translateY(0); opacity: 1; }
+}
+
+.kb-menu_title {
+  font-weight: 600;
+  padding: 10px 14px;
+  background: var(--bg-2) !important;
+  color: var(--txt) !important;
+  border-bottom: 1px solid var(--line) !important;
+}
+
+.kb-menu_list {
+  list-style: none;
+  margin: 0;
+  padding: 6px 0;
+}
+
+.kb-menu_item {
+  padding: 10px 14px;
+  cursor: pointer;
+  user-select: none;
+  font-size: 14px;
+  line-height: 1.35;
+  color: inherit;
+  background: transparent;
+  transition: background 120ms ease, color 120ms ease;
+}
+.kb-menu_item:hover {
+  transform: translateY(-1px);
+  background: var(--hover);
+}
+
+.kb-menu_divider {
+  height: 1px;
+  margin: 6px 0;
+  background: var(--line) !important;
+}
+
+/* -------------------------------
+   UserProfile dropdown (.dropdown)
+   ------------------------------- */
+.dropdown {
+  /* 위치는 컴포넌트 inline style(top/left/fixed) 사용 */
+  z-index: 2147483647 !important;
+  min-width: 180px;
+  max-width: 260px;
+
+  background: var(--bg-elev) !important;
+  color: var(--txt) !important;
+  border: 1px solid var(--line) !important;
+  border-radius: 10px;
+  box-shadow: var(--shadow-lg);
+
+  padding: 4px 0;
+  overflow: hidden;
+  animation: dropdownFade 150ms ease-out;
+}
+
+@keyframes dropdownFade {
+  from { opacity: 0; transform: translateY(-4px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+.dropdown_item {
+  display: block;
+  width: 100%;
+  padding: 10px 14px;
+
+  background: transparent;
+  border: 0;
+  color: inherit;
+  text-align: left;
+  font-size: 14px;
+  line-height: 1.35;
+
+  cursor: pointer;
+  user-select: none;
+  transition: background 140ms ease, color 140ms ease;
+}
+.dropdown_item img {
+  width: 16px;
+  height: 16px;
+  display: block;
+}
+.dropdown_item:hover,
+.dropdown_item:focus-visible {
+  background: var(--hover);
+  transform: translateY(-1px);
+}
+
+[data-theme="dark"] .dropdown_item img {
+  filter: brightness(0) saturate(100%) invert(1) contrast(120%);
+  width: 18px;
+  height: 18px;
+}
+
+.dropdown_item.danger {
+  color: var(--danger) !important;
+}
+.dropdown_item.danger:hover,
+.dropdown_item.danger:focus-visible {
+  background: var(--danger-weak) !important;
+  color: var(--danger) !important;
+}
+
+.dropdown_sep {
+  height: 1px;
+  margin: 6px 0;
+  background: var(--line) !important;
+}
+
+/* -----------------------------------------
+   강력한 라이트 강제(전역 .dark / data-theme 무시)
+   ----------------------------------------- */

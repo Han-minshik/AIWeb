@@ -1,0 +1,350 @@
+.hm-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.35);
+  backdrop-filter: blur(2px);
+  z-index: 2147483000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.hm-container {
+  width: min(1000px, 92vw);
+  max-height: 84vh;
+  background: var(--bg-elev);
+  color: var(--txt);
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  box-shadow: var(--shadow-lg);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.hm-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 14px 16px;
+  background: var(--bg-2);
+  border-bottom: 1px solid var(--line);
+}
+
+.hm-header-left {
+  flex: 0 0 auto;
+}
+
+.hm-header-center {
+  flex: 1 1 auto;
+}
+
+.hm-header-right {
+  flex: 0 0 auto;
+}
+
+.hm-header h2 {
+  margin: 0;
+  font-size: 17px;
+  font-weight: 700;
+  color: var(--txt);
+}
+
+.hm-close {
+  background: transparent;
+  border: 0;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 18px;
+  line-height: 1;
+  padding: 4px 6px;
+  border-radius: 8px;
+}
+
+.hm-close img {
+  width: 16px;
+  height: 16px;
+  display: block;
+  filter: brightness(0) saturate(100%) contrast(140%);
+}
+
+.hm-close:hover {
+  transform: translateY(-1px);
+  color: var(--brand);
+}
+
+[data-theme="dark"] .hm-close {
+  color: #ffffff;
+}
+
+[data-theme="dark"] .hm-header .hm-close {
+  color: #ffffff;
+}
+
+[data-theme="dark"] .hm-close img {
+  filter: brightness(0) saturate(100%) invert(1) contrast(120%);
+}
+
+.hm-search {
+  width: 100%;
+  padding: 9px 12px;
+  border-radius: 10px;
+  border: 1.5px solid var(--line);
+  background: var(--bg-2);
+  color: var(--txt);
+  outline: none;
+  font-size: 13px;
+  transition: box-shadow 0.15s ease, border-color 0.15s ease,
+    background-color 0.15s ease;
+}
+
+.hm-search::placeholder {
+  color: var(--muted);
+}
+
+.hm-search:focus {
+  box-shadow: none;
+  border-color: var(--brand);
+}
+
+.hm-content {
+  padding: 8px 10px 0 10px;
+  overflow: hidden;
+  background-color: var(--bg-2);
+}
+
+.hm-table-wrap {
+  overflow: auto;
+  max-height: 62vh;
+  border-radius: 14px;
+  border: 1px solid var(--line);
+  background: var(--bg-elev);
+}
+
+.hm-table {
+  width: 100%;
+  border-collapse: separate;
+  border-spacing: 0;
+  table-layout: fixed;
+  font-size: 13px;
+}
+
+.hm-table thead th {
+  position: sticky;
+  top: 0;
+  background: var(--bg-2);
+  color: var(--muted);
+  text-align: left;
+  padding: 10px 10px;
+  border-bottom: 1px solid var(--line);
+  z-index: 2;
+  font-weight: 700;
+}
+
+.hm-table thead th:first-child {
+  border-top-left-radius: 14px;
+}
+
+.hm-table thead th:last-child {
+  border-top-right-radius: 14px;
+}
+
+.hm-th-actions {
+  text-align: right;
+}
+
+.hm-table tbody td {
+  padding: 9px 10px;
+  vertical-align: middle;
+  color: var(--txt);
+  border-bottom: 1px solid var(--line);
+  background: var(--bg-elev);
+}
+
+.hm-table tbody tr:last-child td {
+  border-bottom: 0;
+}
+
+.hm-actions {
+  text-align: right;
+  padding-right: 16px;
+  background: transparent;
+}
+
+.hm-table tbody tr:nth-child(even) td {
+  background: var(--bg-2);
+}
+
+.hm-table tbody tr:hover td:not(.hm-actions) {
+  /* background: #bae0ff; */
+}
+
+.hm-table tbody tr:hover td:last-child {
+  background: transparent;
+}
+
+.hm-empty {
+  text-align: center;
+  color: var(--muted);
+  padding: 18px;
+}
+
+.hm-footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 10px 12px;
+  background: var(--bg-2);
+  border-top: 1px solid var(--line);
+}
+
+.hm-btn {
+  background: var(--bg-elev);
+  color: var(--txt) !important;
+  border: 1px solid var(--line) !important;
+  text-align: center;
+  align-items: center;
+  border-radius: 8px;
+  padding: 6px 16px;
+  font-size: 12px;
+}
+
+.hm-btn:hover {
+  cursor: pointer;
+  /* background: #bae0ff; */
+  transform: translateY(-1px);
+}
+
+.hm-icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border-radius: 10px;
+  cursor: pointer;
+  border: 1.6px solid var(--danger);
+  color: var(--txt);
+  background: var(--bg-elev);
+  transition: transform 0.12s ease, box-shadow 0.12s ease, background-color 0.12s ease;
+}
+
+.hm-icon-btn:hover {
+  color: var(--danger);
+  transform: translateY(-1px);
+  box-shadow: var(--shadow-sm);
+}
+
+.hm-trash-icon {
+  display: block;
+  color: var(--danger);
+}
+
+.hm-ellipsis {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.clickable {
+  cursor: pointer;
+}
+
+.hm-row {
+  height: 42px;
+}
+
+.hm-date,
+.hm-agent {
+  color: var(--txt);
+}
+
+.hm-table-wrap::-webkit-scrollbar {
+  height: 10px;
+  width: 10px;
+}
+
+.hm-table-wrap::-webkit-scrollbar-thumb {
+  background: var(--line);
+  border-radius: 10px;
+}
+
+.hm-table-wrap::-webkit-scrollbar-thumb:hover {
+  background: var(--muted);
+}
+
+.hm-table-wrap::-webkit-scrollbar-track {
+  background: var(--bg-2);
+}
+
+.hm-confirm-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.4);
+  z-index: 2147483000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.hm-confirm {
+  width: min(460px, 92vw);
+  background: var(--bg-elev);
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  box-shadow: var(--shadow-lg);
+  overflow: hidden;
+}
+
+.hm-confirm-head {
+  padding: 14px 16px;
+  background: var(--bg-2);
+  border-bottom: 1px solid var(--line);
+  font-weight: 700;
+  color: var(--txt);
+}
+
+.hm-confirm-body {
+  padding: 16px;
+  color: var(--txt);
+  font-size: 14px;
+  line-height: 1.6;
+}
+
+.hm-confirm-row {
+  margin: 4px 0;
+}
+
+.hm-confirm-row b {
+  display: inline-block;
+  width: 46px;
+  color: var(--muted);
+}
+
+.hm-confirm-foot {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 12px 16px;
+  background: var(--bg-2);
+  border-top: 1px solid var(--line);
+}
+
+.hm-btn-danger {
+  background: var(--bg-elev);
+  border: 2px solid var(--danger-weak);
+  color: var(--danger);
+  padding: 9px 14px;
+  border-radius: 10px;
+  cursor: pointer;
+  font-size: 13px;
+  transition: background-color 0.15s ease, border-color 0.15s ease,
+    color 0.15s ease;
+}
+
+.hm-btn-danger:hover {
+  background: var(--danger-weak);
+  border-color: var(--danger);
+  color: var(--danger);
+}
+

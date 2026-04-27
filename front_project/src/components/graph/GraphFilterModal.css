@@ -1,0 +1,63 @@
+.graph-filter-modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: var(--graph-modal-overlay, rgba(15, 23, 42, 0.4));
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+}
+
+.graph-filter-modal {
+  background: var(--graph-modal-bg, var(--bg-elev));
+  border-radius: 8px;
+  box-shadow: var(--graph-modal-shadow, var(--shadow-lg));
+  padding: 16px 20px 18px;
+  width: 420px;
+  max-width: calc(100% - 32px);
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.graph-filter-modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.graph-filter-modal-title {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--graph-modal-title, var(--text));
+}
+
+.graph-filter-modal-body {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.graph-filter-modal-row {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.graph-filter-modal-footer {
+  margin-top: 4px;
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.graph-button.X {
+    border: none;
+    background: transparent;
+}
+
+[data-theme="dark"] {
+  --graph-modal-overlay: rgba(8, 11, 18, 0.7);
+}

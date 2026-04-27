@@ -1,0 +1,113 @@
+.kb-ver-modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(15, 23, 42, 0.45);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 100000;
+}
+
+.kb-ver-modal {
+  width: min(720px, 92vw);
+  max-height: 80vh;
+  background: #ffffff;
+  border-radius: 12px;
+  box-shadow: 0 20px 60px rgba(15, 23, 42, 0.25);
+  padding: 18px 18px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.kb-ver-header {
+  position: relative;
+  padding-right: 28px;
+}
+
+.kb-ver-title {
+  font-size: 18px;
+  font-weight: 700;
+}
+
+.kb-ver-sub {
+  font-size: 12px;
+  opacity: 0.7;
+  margin-top: 2px;
+}
+
+.kb-ver-close {
+  position: absolute;
+  right: 0;
+  top: 0;
+  border: none;
+  background: transparent;
+  font-size: 20px;
+  cursor: pointer;
+}
+
+.kb-ver-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.kb-ver-btn {
+  border: 1px solid #d1d5db;
+  background: #f8fafc;
+  padding: 6px 12px;
+  border-radius: 8px;
+  cursor: pointer;
+}
+
+.kb-ver-loading {
+  font-size: 12px;
+  opacity: 0.7;
+}
+
+.kb-ver-list {
+  overflow: auto;
+  border: 1px solid #e5e7eb;
+  border-radius: 10px;
+}
+
+.kb-ver-row {
+  display: grid;
+  grid-template-columns: 60px 1fr 140px;
+  gap: 8px;
+  align-items: center;
+  padding: 10px 12px;
+  border-top: 1px solid #e5e7eb;
+  cursor: grab;
+  background: #fff;
+}
+
+.kb-ver-row:first-child {
+  border-top: none;
+}
+
+.kb-ver-row.dragging {
+  opacity: 0.6;
+}
+
+.kb-ver-rev {
+  font-weight: 700;
+}
+
+.kb-ver-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.kb-ver-date {
+  font-size: 12px;
+  opacity: 0.7;
+  text-align: right;
+}
+
+.kb-ver-empty {
+  padding: 16px;
+  text-align: center;
+  opacity: 0.6;
+}
