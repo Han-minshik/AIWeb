@@ -231,13 +231,54 @@ def get_tree(group_id: int, user_id: int = Depends(get_current_user_id)):
 
     rows = fetch_all(
         """
-        SELECT node_id, parent_id, name, type, target_type, target_id
-        FROM bookmark_nodes
-        WHERE group_id=%s
-        ORDER BY 
-            CASE WHEN parent_id IS NULL THEN 0 ELSE 1 END,
-            parent_id,
-            name
+        SELECT
+            bn.node_id,
+            bn.parent_id,
+            bn.name,
+            bn.type,
+            bn.target_type,
+            bn.target_id,
+            dm.doc_master_id,
+            dm.title AS doc_title,
+            dr.storage_object_id,
+            so.name AS storage_object_name,
+            so.file_right AS storage_object_file_right,
+            so.relative_path AS storage_object_relative_path,
+            so.sub_path AS storage_object_sub_path,
+            so.mime_type AS storage_object_mime_type,
+            UPPER(
+                COALESCE(
+                    (
+                        SELECT n.branch_type
+                          FROM pf_node_props p
+                          JOIN tree_nodes n ON n.node_id = p.node_id
+                         WHERE p.doc_master_id = dm.doc_master_id
+                         ORDER BY n.node_id
+                         LIMIT 1
+                    ),
+                    'GENERAL'
+                )
+            ) AS branch_type
+        FROM bookmark_nodes bn
+        LEFT JOIN doc_master dm
+               ON bn.target_type='DOC_MASTER'
+              AND dm.doc_master_id = bn.target_id
+        LEFT JOIN doc_revisions dr
+               ON dr.revision_id = (
+                    SELECT r.revision_id
+                      FROM doc_revisions r
+                     WHERE r.doc_master_id = dm.doc_master_id
+                       AND r.deleted_at IS NULL
+                     ORDER BY r.rev_no DESC
+                     LIMIT 1
+               )
+        LEFT JOIN storage_objects so
+               ON so.object_id = dr.storage_object_id
+        WHERE bn.group_id=%s
+        ORDER BY
+            CASE WHEN bn.parent_id IS NULL THEN 0 ELSE 1 END,
+            bn.parent_id,
+            bn.name
         """,
         (group_id,),
     )
@@ -259,6 +300,17 @@ def get_tree(group_id: int, user_id: int = Depends(get_current_user_id)):
                     "meta": {
                         "target_type": r["target_type"],
                         "target_id": r["target_id"],
+                        "doc_id": r.get("doc_master_id"),
+                        "doc_master_id": r.get("doc_master_id"),
+                        "doc_title": r.get("doc_title"),
+                        "object_id": r.get("storage_object_id"),
+                        "storage_object_id": r.get("storage_object_id"),
+                        "storage_object_name": r.get("storage_object_name"),
+                        "storage_object_file_right": r.get("storage_object_file_right"),
+                        "storage_object_relative_path": r.get("storage_object_relative_path"),
+                        "storage_object_sub_path": r.get("storage_object_sub_path"),
+                        "mime_type": r.get("storage_object_mime_type"),
+                        "branch_type": r.get("branch_type"),
                     },
                     "children": build(r["node_id"]),
                 }

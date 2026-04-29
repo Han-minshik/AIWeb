@@ -98,10 +98,6 @@ export async function listMessages(sessionId, page = 1, page_size = 200) {
   };
 }
 
-export async function searchSessions(q) {
-  return await http.get('/chat/search', { q });
-}
-
 export async function deleteSession(sessionId) {
   if (sessionId == null) throw new Error('sessionId is required');
   return await http.delete(`/chat/sessions/${sessionId}`);

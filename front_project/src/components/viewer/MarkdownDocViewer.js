@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useState } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import remarkBreaks from 'remark-breaks';
+import rehypeRaw from 'rehype-raw';
 import { getDocMetaByObjectId, loadMarkdownByRoutes } from '../../services/docs/docService';
 import '../../styles/components/markdown-doc-viewer.css';
 
@@ -278,7 +279,11 @@ export default function MarkdownDocViewer({
         <div className="loading">MD Loading...</div>
       ) : (
         <div className="markdown-doc-body">
-          <ReactMarkdown remarkPlugins={[remarkGfm, remarkBreaks]} components={components}>
+          <ReactMarkdown
+            remarkPlugins={[remarkGfm, remarkBreaks]}
+            rehypePlugins={[rehypeRaw]}
+            components={components}
+          >
             {content}
           </ReactMarkdown>
         </div>

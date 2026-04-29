@@ -1347,6 +1347,7 @@ export default function RightSidebar({ rightOpen, onToggle }) {
               bottomRef={bottomRef}
               openDoc={openDoc}
               openDocByTitle={openDocByTitle}
+              normalizeMdLite={normalizeMdLite}
             />
           )}
         </div>

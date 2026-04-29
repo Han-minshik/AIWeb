@@ -48,22 +48,11 @@ export const reorderDocRevisions = async (docId, revision_ids) =>
 export const deleteDoc = async (docId, mode = 'all') =>
   await http.post(`/docs/${docId}/delete`, { mode });
 
-export const listTags = async (docId) => await http.get(`/docs/${docId}/tags`);
-
-export const setTags = async (docId, tags) =>
-  await http.patch(`/docs/${docId}/tags`, { tags });
-
 export const getDocsTree = async (group_by = 'none', kb_id) => {
   const params = { group_by };
   if (kb_id) params.kb_id = kb_id;
   return await http.get('/docs-tree/tree-data', params);
 };
-
-export const batchRename = async (objectIds, new_name_prefix) =>
-  await http.patch('/docs/batch-rename', { object_ids: objectIds, new_name_prefix });
-
-export const batchDelete = async (objectIds) =>
-  await http.delete('/docs/batch', { object_ids: objectIds });
 
 export const copyDoc = async (docId, { new_name, parent_node_id = null, tree_id = null } = {}) =>
   await http.post(`/docs/${docId}/copy`, { new_name, parent_node_id, tree_id });

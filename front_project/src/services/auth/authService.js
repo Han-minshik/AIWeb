@@ -55,13 +55,8 @@ export async function logoutServer() {
   try {
     await http.post('/auth/logout', {});
     return true;
-  } catch (_) {
-    try {
-      await http.post('/logout', {});
-      return true;
-    } catch {
-      return false;
-    }
+  } catch {
+    return false;
   }
 }
 

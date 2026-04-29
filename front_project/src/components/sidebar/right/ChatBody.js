@@ -15,6 +15,7 @@ const ChatBody = React.memo(function ChatBody({
   bottomRef,
   openDoc,
   openDocByTitle,
+  normalizeMdLite = (s = '') => String(s ?? ''),
 }) {
   const isAssistantAddon = useCallback((m) => {
     return (

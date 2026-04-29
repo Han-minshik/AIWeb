@@ -16423,49 +16423,6 @@ CREATE TABLE IF NOT EXISTS `project_nodes` (
 
 -- 테이블 데이터 obsidian_db_2.project_nodes:~0 rows (대략적) 내보내기
 
--- 프로시저 obsidian_db_2.sp_create_index_if_absent 구조 내보내기
-DELIMITER //
-CREATE PROCEDURE `sp_create_index_if_absent`(
-  IN in_table VARCHAR(64),
-  IN in_index VARCHAR(64),
-  IN in_cols  VARCHAR(512)
-)
-BEGIN
-  IF NOT EXISTS (
-    SELECT 1 FROM information_schema.statistics
-     WHERE table_schema = DATABASE()
-       AND table_name = in_table
-       AND index_name  = in_index
-  ) THEN
-    SET @sql := CONCAT('CREATE INDEX ', in_index, ' ON ', in_table, ' (', in_cols, ')');
-    PREPARE stmt FROM @sql; EXECUTE stmt; DEALLOCATE PREPARE stmt;
-  END IF;
-END//
-DELIMITER ;
-
--- 프로시저 obsidian_db_2.sp_kb_apply_policy_to_source 구조 내보내기
-DELIMITER //
-CREATE PROCEDURE `sp_kb_apply_policy_to_source`(
-  IN p_source_id BIGINT UNSIGNED,
-  IN p_policy_code VARCHAR(3),
-  IN p_owner_group_id BIGINT UNSIGNED
-)
-BEGIN
-  
-  DECLARE v_org BIGINT UNSIGNED;
-  SELECT org_id INTO v_org FROM kb_sources WHERE source_id = p_source_id;
-
-  
-  INSERT INTO acl_bindings(resource_type, resource_pk, org_id, policy_code, owner_group_id)
-  SELECT 'TREE_NODE', k.node_id, v_org, p_policy_code, p_owner_group_id
-  FROM kb_node_props k
-  WHERE k.source_id = p_source_id
-  ON DUPLICATE KEY UPDATE
-    policy_code = VALUES(policy_code),
-    owner_group_id = VALUES(owner_group_id);
-END//
-DELIMITER ;
-
 -- 프로시저 obsidian_db_2.sp_tree_add_node 구조 내보내기
 DELIMITER //
 CREATE PROCEDURE `sp_tree_add_node`(IN p_node BIGINT)
@@ -28219,35 +28176,6 @@ CREATE TABLE IF NOT EXISTS `users` (
 INSERT INTO `users` (`user_id`, `org_id`, `username`, `password_hash`, `full_name`, `department_id`, `position_id`, `email`, `is_active`, `is_admin`, `created_at`, `last_login_at`) VALUES
 	(1, 1, 'admin', 'ac9689e2272427085e35b9d3e3e8bed88cb3434828b43b86fc0596cad4c6e270', 'Admin', 1, 1, 'admin@aster.local', 1, 1, '2025-09-19 14:30:46', NULL),
 	(4, 1, 'user', '5994471abb01112afcc18159f6cc74b4f511b99806da59b3caf5a9c173cacfc5', 'user', NULL, NULL, 'user@local', 1, 0, '2025-09-23 09:33:41', NULL);
-
--- 테이블 obsidian_db_2.wbs_tasks 구조 내보내기
-CREATE TABLE IF NOT EXISTS `wbs_tasks` (
-  `task_id` bigint(20) unsigned NOT NULL AUTO_INCREMENT,
-  `org_id` bigint(20) unsigned NOT NULL,
-  `project_no` varchar(50) NOT NULL,
-  `sbs_node_id` bigint(20) unsigned DEFAULT NULL,
-  `task_name` varchar(255) NOT NULL,
-  `task_owner_user_id` bigint(20) unsigned DEFAULT NULL,
-  `owner_group_id` bigint(20) unsigned DEFAULT NULL,
-  `start_date` date NOT NULL,
-  `end_date` date NOT NULL,
-  `work_duration_days` int(11) GENERATED ALWAYS AS (to_days(`end_date`) - to_days(`start_date`) + 1) VIRTUAL,
-  `percent_complete` decimal(5,2) NOT NULL DEFAULT 0.00,
-  `status` enum('PLANNED','IN_PROGRESS','BLOCKED','DONE') NOT NULL DEFAULT 'PLANNED',
-  `created_at` datetime NOT NULL DEFAULT current_timestamp(),
-  `updated_at` datetime NOT NULL DEFAULT current_timestamp() ON UPDATE current_timestamp(),
-  PRIMARY KEY (`task_id`),
-  KEY `idx_wbs_proj` (`org_id`,`project_no`),
-  KEY `fk_wbs_sbs` (`sbs_node_id`),
-  KEY `fk_wbs_owner_user` (`task_owner_user_id`),
-  KEY `idx_wbs_group_proj` (`owner_group_id`,`project_no`),
-  CONSTRAINT `fk_wbs_group` FOREIGN KEY (`owner_group_id`) REFERENCES `org_groups` (`group_id`) ON DELETE SET NULL,
-  CONSTRAINT `fk_wbs_org` FOREIGN KEY (`org_id`) REFERENCES `orgs` (`org_id`) ON DELETE CASCADE,
-  CONSTRAINT `fk_wbs_owner_user` FOREIGN KEY (`task_owner_user_id`) REFERENCES `users` (`user_id`) ON DELETE SET NULL,
-  CONSTRAINT `fk_wbs_sbs` FOREIGN KEY (`sbs_node_id`) REFERENCES `tree_nodes` (`node_id`) ON DELETE SET NULL
-) ENGINE=InnoDB AUTO_INCREMENT=3 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
-
--- 테이블 데이터 obsidian_db_2.wbs_tasks:~0 rows (대략적) 내보내기
 
 -- 트리거 obsidian_db_2.trg_storage_objects_acl_ai 구조 내보내기
 SET @OLDTMP_SQL_MODE=@@SQL_MODE, SQL_MODE='STRICT_TRANS_TABLES,NO_ENGINE_SUBSTITUTION';

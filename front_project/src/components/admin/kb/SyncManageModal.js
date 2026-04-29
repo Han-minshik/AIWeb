@@ -495,7 +495,7 @@ export default function SyncManageModal({ open, onClose, kbId }) {
         <div className="sync-modal-head">
           <div className="sync-modal-title">Sync Management</div>
           <button type="button" className="sync-modal-close" onClick={onClose} aria-label="Close">
-            ¡¿
+            X
           </button>
         </div>
 
@@ -622,7 +622,7 @@ export default function SyncManageModal({ open, onClose, kbId }) {
                 onClick={() => setConfirmOpen(false)}
                 aria-label="Close confirm"
               >
-                ¡¿
+                ï¿½ï¿½
               </button>
             </div>
             <div className="sync-confirm-warning">

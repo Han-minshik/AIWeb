@@ -1,5 +1,6 @@
 import React from 'react';
 import '../../styles/components/status-ticker.css';
+import starsIcon from '../../assets/icons/stars.svg';
 
 export default function StatusTicker({
   visible = false,
@@ -51,7 +52,7 @@ export default function StatusTicker({
           />
         </div>
         <div className="stx-hint">
-          <i className="bi bi-stars stx-spin" aria-hidden="true" />
+          <img className="stx-spin stx-stars-icon" src={starsIcon} alt="" aria-hidden="true" />
           <span>{step || hint}</span>
         </div>
       </div>
@@ -86,7 +87,7 @@ export default function StatusTicker({
       )}
 
       <div className="stx-hint">
-        <i className="bi bi-stars stx-spin" aria-hidden="true" />
+        <img className="stx-spin stx-stars-icon" src={starsIcon} alt="" aria-hidden="true" />
         <span>{step || hint}</span>
       </div>
     </div>

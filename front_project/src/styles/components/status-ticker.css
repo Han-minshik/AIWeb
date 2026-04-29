@@ -137,6 +137,12 @@
   filter: drop-shadow(0 0 6px rgba(122,162,247,0.6));
 }
 
+.stx-stars-icon {
+  width: 14px;
+  height: 14px;
+  object-fit: contain;
+}
+
 @keyframes stx-rotate { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
 @keyframes stx-pulse {
   0%,100% { box-shadow: 0 0 0 0 rgba(122,162,247,0.6); }

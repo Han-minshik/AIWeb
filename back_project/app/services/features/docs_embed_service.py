@@ -24,6 +24,7 @@ JWT_ALG = "HS256"
 URL_TTL_MINUTES = int(os.getenv("EMBEDPDF_URL_TTL_MINUTES", "20"))
 SYNAP_BASE_URL = os.getenv("SYNAP_BASE_URL", "http://localhost:8080/SynapDocViewServer").rstrip("/")
 DOCS_EMBED_PUBLIC_BASE_URL = os.getenv("DOCS_EMBED_PUBLIC_BASE_URL", "http://localhost:8001").rstrip("/")
+DOCS_EMBED_PREFIX = "/docs-embed"
 SYNAP_JOB_RESOLVE_TIMEOUT_SEC = int(os.getenv("SYNAP_JOB_RESOLVE_TIMEOUT_SEC", "90"))
 SYNAP_WATERMARK_ENABLED = str(os.getenv("SYNAP_WATERMARK_ENABLED", "true")).strip().lower() in (
     "1",
@@ -537,7 +538,7 @@ def _build_fid_for_synap(
 
 def _make_signed_stream_url(object_id: int) -> Tuple[str, str]:
     token, exp = _issue_token(object_id=str(int(object_id)))
-    rel_url = router.prefix + f"/by-object/{int(object_id)}/stream?token={token}"
+    rel_url = DOCS_EMBED_PREFIX + f"/by-object/{int(object_id)}/stream?token={token}"
     abs_url = f"{DOCS_EMBED_PUBLIC_BASE_URL}{rel_url}" if DOCS_EMBED_PUBLIC_BASE_URL else rel_url
     return abs_url, exp.isoformat()
 
@@ -786,7 +787,7 @@ def get_file_meta_by_id(
 
     token, exp = _issue_token(object_id=unquote(stored_filename))
     encoded = quote(unquote(stored_filename), safe="")
-    meta.signed_url = router.prefix + f"/{encoded}/stream?token={token}"
+    meta.signed_url = DOCS_EMBED_PREFIX + f"/{encoded}/stream?token={token}"
     meta.expires_at = exp.isoformat()
     return meta
 
@@ -811,7 +812,7 @@ def get_file_meta_by_object_id(
 
     token, exp = _issue_token(object_id=unquote(stored_filename))
     encoded = quote(unquote(stored_filename), safe="")
-    meta.signed_url = router.prefix + f"/{encoded}/stream?token={token}"
+    meta.signed_url = DOCS_EMBED_PREFIX + f"/{encoded}/stream?token={token}"
     meta.expires_at = exp.isoformat()
     return meta
 
@@ -847,7 +848,7 @@ def get_file_meta_by_name(
 
     token, exp = _issue_token(object_id=unquote(stored_filename))
     encoded = quote(unquote(stored_filename), safe="")
-    meta.signed_url = router.prefix + f"/{encoded}/stream?token={token}"
+    meta.signed_url = DOCS_EMBED_PREFIX + f"/{encoded}/stream?token={token}"
     meta.expires_at = exp.isoformat()
     return meta
 
@@ -939,7 +940,7 @@ def renew_signed_url_by_object_id(object_id: int = Path(..., ge=1)):
     token, exp = _issue_token(object_id=unquote(stored_filename))
     encoded = quote(unquote(stored_filename), safe="")
     return {
-        "signed_url": router.prefix + f"/{encoded}/stream?token={token}",
+        "signed_url": DOCS_EMBED_PREFIX + f"/{encoded}/stream?token={token}",
         "expires_at": exp.isoformat(),
     }
 
@@ -949,7 +950,7 @@ def renew_signed_url_by_id(doc_id: int = Path(..., ge=1)):
     token, exp = _issue_token(object_id=unquote(stored_filename))
     encoded = quote(unquote(stored_filename), safe="")
     return {
-        "signed_url": router.prefix + f"/{encoded}/stream?token={token}",
+        "signed_url": DOCS_EMBED_PREFIX + f"/{encoded}/stream?token={token}",
         "expires_at": exp.isoformat(),
     }
 
@@ -959,7 +960,7 @@ def renew_signed_url(stored_filename: str, request: Request):
     token, exp = _issue_token(object_id=unquote(stored_filename))
     encoded = quote(unquote(stored_filename), safe="")
     return {
-        "signed_url": router.prefix + f"/{encoded}/stream?token={token}",
+        "signed_url": DOCS_EMBED_PREFIX + f"/{encoded}/stream?token={token}",
         "expires_at": exp.isoformat(),
     }
 
@@ -1095,7 +1096,7 @@ def get_file_meta(stored_filename: str, request: Request):
     if can_read:
         token, exp = _issue_token(object_id=unquote(stored_filename))
         encoded = quote(unquote(stored_filename), safe="")
-        meta.signed_url = router.prefix + f"/{encoded}/stream?token={token}"
+        meta.signed_url = DOCS_EMBED_PREFIX + f"/{encoded}/stream?token={token}"
         meta.expires_at = exp.isoformat()
 
     return meta

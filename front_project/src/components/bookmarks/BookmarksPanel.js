@@ -70,13 +70,13 @@ function collectDocIdsFromTree(nodes = []) {
     if (!cur) continue;
     if (cur.meta?.target_type === 'DOC_MASTER') {
       const raw =
+        cur?.meta?.doc_id ||
+        cur?.meta?.doc_master_id ||
+        cur?.meta?.target_id ||
         cur?.meta?.object_id ||
         cur?.meta?.objectId ||
         cur?.meta?.storage_object_id ||
-        cur?.meta?.storageObjectId ||
-        cur?.meta?.doc_id ||
-        cur?.meta?.doc_master_id ||
-        cur?.meta?.target_id;
+        cur?.meta?.storageObjectId;
       const n = Number(raw);
       if (Number.isFinite(n)) out.push(n);
     }
@@ -127,13 +127,40 @@ const toSafeTitle = (title, docId) => {
   return 'Doc';
 };
 
-const dispatchOpenDoc = (docId, title, objectId = null) => {
+const buildLookupFilename = (baseName, ext) => {
+  const base = String(baseName || '').trim();
+  if (!base) return '';
+  const right = String(ext || '').trim().replace(/^\./, '');
+  if (!right) return base;
+  const lowerBase = base.toLowerCase();
+  const lowerExt = right.toLowerCase();
+  if (lowerBase.endsWith(`.${lowerExt}`)) return base;
+  return `${base}.${right}`;
+};
+
+const dispatchOpenDoc = ({
+  docId,
+  title,
+  objectId = null,
+  docTitle = null,
+  docRelPath = null,
+  docSubPath = null,
+  docFileRight = null,
+  docStoredPath = null,
+  docBranchType = null,
+}) => {
   if (!docId) return;
   const safeTitle = toSafeTitle(title, docId);
   dispatchOpenDocTab({
     docId,
-    objectId: objectId ?? docId,
+    objectId: objectId ?? null,
     title: safeTitle,
+    docTitle: docTitle || safeTitle,
+    docRelPath: docRelPath ?? null,
+    docSubPath: docSubPath ?? null,
+    docFileRight: docFileRight ?? null,
+    docStoredPath: docStoredPath ?? null,
+    docBranchType: docBranchType ?? null,
   });
 };
 
@@ -270,21 +297,59 @@ export default function BookmarksPanel() {
   const openBookmark = (node) => {
     if (!node || !node.meta?.target_type) return;
     if (node.meta.target_type === 'DOC_MASTER') {
+      const meta = node?.meta || {};
       const docId =
-        node?.meta?.doc_id ||
-        node?.meta?.doc_master_id ||
-        node?.meta?.target_id;
+        meta?.doc_id ||
+        meta?.doc_master_id ||
+        meta?.target_id;
       const objectId =
-        node?.meta?.object_id ||
-        node?.meta?.objectId ||
-        node?.meta?.storage_object_id ||
-        node?.meta?.storageObjectId ||
+        meta?.object_id ||
+        meta?.objectId ||
+        meta?.storage_object_id ||
+        meta?.storageObjectId ||
         null;
       if (!docId) {
         window.alert('Document information not found.');
         return;
       }
-      dispatchOpenDoc(docId, toSafeTitle(node?.name, docId), objectId);
+      const fileRightRaw =
+        meta?.storage_object_file_right ||
+        meta?.file_right ||
+        meta?.fileRight ||
+        null;
+      const fileRight = String(fileRightRaw || '').trim().replace(/^\./, '') || null;
+      const baseName = meta?.storage_object_name || meta?.doc_title || node?.name || '';
+      const lookupTitle = buildLookupFilename(baseName, fileRight);
+      const docRelPath =
+        meta?.storage_object_relative_path ??
+        meta?.relative_path ??
+        meta?.doc_rel_path ??
+        null;
+      const docSubPath =
+        meta?.storage_object_sub_path ??
+        meta?.sub_path ??
+        meta?.doc_sub_path ??
+        null;
+      const docBranchType =
+        meta?.branch_type ??
+        meta?.doc_branch_type ??
+        null;
+      const docStoredPath =
+        meta?.stored_path ??
+        meta?.doc_stored_path ??
+        null;
+
+      dispatchOpenDoc({
+        docId,
+        title: toSafeTitle(node?.name, docId),
+        objectId,
+        docTitle: lookupTitle || toSafeTitle(node?.name, docId),
+        docRelPath,
+        docSubPath,
+        docFileRight: fileRight,
+        docStoredPath,
+        docBranchType,
+      });
     } else {
       window.alert('This bookmark type is not supported.');
     }
