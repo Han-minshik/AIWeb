@@ -25,26 +25,53 @@ export default function LeftSidebar({ leftOpen, onToggle }) {
 
   const [kbRoots, setKbRoots] = useState([]);
   const [kbRootId, setKbRootId] = useState(null);
+  const [kbScope, setKbScope] = useState('admin');
   const [rootsLoading, setRootsLoading] = useState(false);
 
   const [vaultOpen, setVaultOpen] = useState(false);
   const vaultRef = useRef(null);
 
-  const emitVaultSelect = useCallback((id, name) => {
+  const emitVaultSelect = useCallback((id, name, itemTypeCodes = [], kbType = '', itemTypeCode = null) => {
     if (id == null) return;
     const kbId = isNaN(Number(id)) ? id : Number(id);
     const kbName = name || `KB ${kbId}`;
     try {
-      window.dispatchEvent(new CustomEvent('kb:vault-select', { detail: { kbId, name: kbName } }));
+      window.dispatchEvent(
+        new CustomEvent('kb:vault-select', {
+          detail: {
+            kbId,
+            name: kbName,
+            itemTypeCodes,
+            item_type_codes: itemTypeCodes,
+            itemTypeCode,
+            item_type_code: itemTypeCode,
+            kbType,
+            kb_type: kbType,
+          },
+        })
+      );
     } catch {}
   }, []);
 
   const normalizeRoots = useCallback((res) => {
     const items = Array.isArray(res) ? res : res?.items || [];
-    return items.map((k) => ({
-      id: k.kb_id ?? k.id ?? k.tree_id,
-      name: k.name ?? `KB ${k.kb_id ?? k.id ?? k.tree_id}`,
-    }));
+    return items.map((k) => {
+      const rawItemTypeCode = k.item_type_code ?? k.itemTypeCode;
+      const itemTypeCode = Number(rawItemTypeCode);
+      return {
+        id: k.kb_id ?? k.id ?? k.tree_id,
+        name: k.name ?? `KB ${k.kb_id ?? k.id ?? k.tree_id}`,
+        kbType: String(k.kb_type ?? k.kbType ?? '').trim().toLowerCase(),
+        ownerUserId: k.kb_owner_user_id ?? k.kbOwnerUserId ?? null,
+        itemTypeCode:
+          rawItemTypeCode != null && rawItemTypeCode !== '' && Number.isFinite(itemTypeCode)
+            ? itemTypeCode
+            : null,
+        itemTypeCodes: (Array.isArray(k.item_type_codes) ? k.item_type_codes : [])
+          .map(Number)
+          .filter(Number.isFinite),
+      };
+    });
   }, []);
 
   const loadRoots = useCallback(async () => {
@@ -53,27 +80,41 @@ export default function LeftSidebar({ leftOpen, onToggle }) {
       const res = await http.get('/kb/trees');
       const arr = normalizeRoots(res);
       setKbRoots(arr);
-
-      if (!kbRootId && arr[0]) {
-        const nextId = arr[0].id;
-        const nextName = arr[0].name;
-        setKbRootId(nextId);
-        emitVaultSelect(nextId, nextName);
-      } else if (kbRootId) {
-        const found = arr.find((r) => String(r.id) === String(kbRootId));
-        emitVaultSelect(kbRootId, found?.name);
-      }
+      return arr;
     } catch {
       setKbRoots([]);
+      return [];
     } finally {
       setRootsLoading(false);
     }
-  }, [kbRootId, emitVaultSelect, normalizeRoots]);
+  }, [normalizeRoots]);
+
+  const scopedKbRoots = useMemo(() => {
+    const arr = kbRoots || [];
+    if (kbScope === 'personal') return arr.filter((r) => r.kbType === 'personal');
+    return arr.filter((r) => r.kbType !== 'personal');
+  }, [kbRoots, kbScope]);
+
+  useEffect(() => {
+    if (!leftOpen || activePanel !== 'kb') return;
+    if (rootsLoading) return;
+
+    const current = scopedKbRoots.find((r) => String(r.id) === String(kbRootId));
+    if (current) {
+      emitVaultSelect(current.id, current.name, current.itemTypeCodes, current.kbType, current.itemTypeCode);
+      return;
+    }
+
+    const next = scopedKbRoots[0] || null;
+    setKbRootId(next?.id ?? null);
+    setVaultOpen(false);
+    if (next) emitVaultSelect(next.id, next.name, next.itemTypeCodes, next.kbType, next.itemTypeCode);
+  }, [activePanel, emitVaultSelect, kbRootId, leftOpen, rootsLoading, scopedKbRoots]);
 
   const forceSelectVaultByName = useCallback(
     async (targetName) => {
       const nameKey = String(targetName || '').trim().toLowerCase();
-      if (!nameKey) return;
+      if (!nameKey) return null;
 
       let roots = kbRoots;
       if (!roots.length) {
@@ -82,16 +123,24 @@ export default function LeftSidebar({ leftOpen, onToggle }) {
           roots = normalizeRoots(res);
           setKbRoots(roots);
         } catch {
-          return;
+          return null;
         }
       }
 
       const found = roots.find((r) => String(r?.name || '').trim().toLowerCase() === nameKey);
-      if (!found) return;
+      if (!found) return null;
 
       const nextId = isNaN(Number(found.id)) ? found.id : Number(found.id);
+      setKbScope(found.kbType === 'personal' ? 'personal' : 'admin');
       setKbRootId(nextId);
-      emitVaultSelect(nextId, found.name);
+      emitVaultSelect(nextId, found.name, found.itemTypeCodes, found.kbType, found.itemTypeCode);
+      return {
+        kbId: nextId,
+        name: found.name,
+        itemTypeCode: found.itemTypeCode,
+        itemTypeCodes: found.itemTypeCodes,
+        kbType: found.kbType,
+      };
     },
     [kbRoots, emitVaultSelect, normalizeRoots]
   );
@@ -101,14 +150,54 @@ export default function LeftSidebar({ leftOpen, onToggle }) {
   }, [leftOpen, activeDock, loadRoots]);
 
   useEffect(() => {
+    const onPersonalKbCreated = async (event) => {
+      const roots = await loadRoots();
+      const requestedId =
+        event?.detail?.kb?.kb_id ??
+        event?.detail?.kb?.id ??
+        event?.detail?.kb_id ??
+        event?.detail?.id ??
+        null;
+      const personalRoots = roots.filter((root) => root.kbType === 'personal');
+      const next =
+        personalRoots.find((root) => requestedId != null && String(root.id) === String(requestedId)) ||
+        personalRoots[0] ||
+        null;
+
+      setKbScope('personal');
+      setActiveDock('kb');
+      setActivePanel('kb');
+      setVaultOpen(false);
+      setKbRootId(next?.id ?? null);
+    };
+
+    window.addEventListener('kb:personal-created', onPersonalKbCreated);
+    return () => window.removeEventListener('kb:personal-created', onPersonalKbCreated);
+  }, [loadRoots]);
+
+  useEffect(() => {
     if (!leftOpen) setVaultOpen(false);
   }, [leftOpen]);
 
   useEffect(() => {
-    const onForceSelect = (e) => {
+    const onOpenBookmarks = () => {
+      if (!leftOpen) onToggle?.();
+      setActiveDock('kb');
+      setActivePanel('bookmarks');
+      setVaultOpen(false);
+    };
+    window.addEventListener('bookmarks:open-panel', onOpenBookmarks);
+    return () => window.removeEventListener('bookmarks:open-panel', onOpenBookmarks);
+  }, [leftOpen, onToggle]);
+
+  useEffect(() => {
+    const onForceSelect = async (e) => {
       const targetName = e?.detail?.name ?? '';
       if (!targetName) return;
-      void forceSelectVaultByName(targetName);
+      const selectedVault = await forceSelectVaultByName(targetName);
+      if (typeof e?.detail?.onResolved === 'function') {
+        e.detail.onResolved(selectedVault);
+      }
     };
     window.addEventListener('kb:vault-force-select', onForceSelect);
     return () => window.removeEventListener('kb:vault-force-select', onForceSelect);
@@ -150,16 +239,23 @@ export default function LeftSidebar({ leftOpen, onToggle }) {
   const handleChangeRootId = (value) => {
     const v = value ? (isNaN(Number(value)) ? value : Number(value)) : null;
     setKbRootId(v);
-    const found = (kbRoots || []).find((r) => String(r.id) === String(v));
-    emitVaultSelect(v, found?.name);
+    const found = (scopedKbRoots || []).find((r) => String(r.id) === String(v));
+    emitVaultSelect(v, found?.name, found?.itemTypeCodes, found?.kbType, found?.itemTypeCode);
   };
 
   const currentKB = useMemo(() => {
     if (!kbRootId) return null;
-    return (kbRoots || []).find((r) => String(r.id) === String(kbRootId)) || null;
-  }, [kbRoots, kbRootId]);
+    return (scopedKbRoots || []).find((r) => String(r.id) === String(kbRootId)) || null;
+  }, [scopedKbRoots, kbRootId]);
 
   const isVaultDisabled = rootsLoading || activePanel !== 'kb';
+
+  const handleKbScopeChange = (nextScope) => {
+    if (kbScope === nextScope) return;
+    setKbScope(nextScope);
+    setVaultOpen(false);
+    setActivePanel('kb');
+  };
 
   const toggleVaultOpen = (e) => {
     e.stopPropagation();
@@ -199,9 +295,11 @@ export default function LeftSidebar({ leftOpen, onToggle }) {
 
   const vaultTitleText = rootsLoading
     ? 'Loading...'
-    : (kbRoots?.length || 0) > 0
+    : (scopedKbRoots?.length || 0) > 0
     ? currentKB?.name || `${label} Vault`
-    : 'No result';
+    : kbScope === 'personal'
+    ? 'No Personal KB'
+    : 'No SE KB';
 
   return (
     <aside className={`left-rail ${leftOpen ? 'open' : 'closed'}`}>
@@ -245,7 +343,7 @@ export default function LeftSidebar({ leftOpen, onToggle }) {
             </div>
 
             <div className="left-rail-content">
-              {activePanel === 'kb' && <ProjectsTreePanel mode="kb" rootId={kbRootId} />}
+              {activePanel === 'kb' && <ProjectsTreePanel mode="kb" rootId={kbRootId} autoSelectRoot={false} />}
               {activePanel === 'bookmarks' && <BookmarksPanel />}
               {!activePanel && (
                 <div className="empty" style={{ padding: 8 }}>
@@ -260,6 +358,16 @@ export default function LeftSidebar({ leftOpen, onToggle }) {
       {leftOpen && (
         <div className="left-bottombar">
           <div className="vault-header">
+            <button
+              type="button"
+              className={`kb-scope-toggle ${kbScope === 'admin' ? 'is-active' : ''}`}
+              onClick={() => handleKbScopeChange(kbScope === 'admin' ? 'personal' : 'admin')}
+              title={kbScope === 'admin' ? 'Switch to Personal KB' : 'Switch to SE KB'}
+              aria-label={kbScope === 'admin' ? 'Switch to Personal KB' : 'Switch to SE KB'}
+              disabled={activePanel !== 'kb'}
+            >
+              {kbScope === 'admin' ? 'SE' : 'My'}
+            </button>
             <div
               ref={vaultRef}
               className={`vault-select-wrap ${vaultOpen ? 'is-open' : ''}`}
@@ -294,11 +402,16 @@ export default function LeftSidebar({ leftOpen, onToggle }) {
 
               {vaultOpen && !isVaultDisabled && (
                 <ul className="custom-options">
-                  {(kbRoots || []).map((r) => (
+                  {(scopedKbRoots || []).map((r) => (
                     <li key={`kb-${r.id}`} onClick={() => handleOptionClick(r.id)}>
                       {r.name}
                     </li>
                   ))}
+                  {!scopedKbRoots?.length && (
+                    <li className="empty-option">
+                      {kbScope === 'personal' ? 'Create Personal KB in Settings.' : 'No SE KB available.'}
+                    </li>
+                  )}
                 </ul>
               )}
             </div>

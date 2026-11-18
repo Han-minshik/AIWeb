@@ -1,5 +1,10 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { listDocRevisions, reorderDocRevisions, uploadVersion } from '../../../services/docs/docService';
+import {
+  deleteDocRevision,
+  listDocRevisions,
+  reorderDocRevisions,
+  uploadVersion,
+} from '../../../services/docs/docService';
 import '../../../styles/admin/kbVersionModal.css';
 
 function toId(v) {
@@ -19,18 +24,28 @@ function formatDate(v) {
   });
 }
 
+function revisionRows(response) {
+  if (Array.isArray(response)) return response;
+  if (Array.isArray(response?.revisions)) return response.revisions;
+  if (Array.isArray(response?.items)) return response.items;
+  return [];
+}
+
 export default function VersionManagerModal({ open, docId, docTitle, onClose }) {
   const [items, setItems] = useState([]);
   const [loading, setLoading] = useState(false);
   const [dragId, setDragId] = useState(null);
+  const [deletingId, setDeletingId] = useState(null);
+  const [error, setError] = useState('');
   const fileRef = useRef(null);
 
   useEffect(() => {
     if (!open || !docId) return;
+    setError('');
     setLoading(true);
     listDocRevisions(docId)
       .then((res) => {
-        const rows = Array.isArray(res?.revisions) ? res.revisions : [];
+        const rows = revisionRows(res);
         setItems(rows);
       })
       .finally(() => setLoading(false));
@@ -67,7 +82,7 @@ export default function VersionManagerModal({ open, docId, docTitle, onClose }) 
       const ids = next.map((r) => r.revision_id).filter((v) => v != null);
       await reorderDocRevisions(docId, ids);
       const fresh = await listDocRevisions(docId);
-      setItems(Array.isArray(fresh?.revisions) ? fresh.revisions : []);
+      setItems(revisionRows(fresh));
     } catch {
       // keep local order if server fails
     }
@@ -84,10 +99,36 @@ export default function VersionManagerModal({ open, docId, docTitle, onClose }) 
     try {
       await uploadVersion(docId, f);
       const fresh = await listDocRevisions(docId);
-      setItems(Array.isArray(fresh?.revisions) ? fresh.revisions : []);
+      setItems(revisionRows(fresh));
     } finally {
       setLoading(false);
       e.target.value = '';
+    }
+  };
+
+  const onDeleteRevision = (revision) => async (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (!docId || !revision?.revision_id) return;
+    const approved = window.confirm(
+      `Delete version v${revision.rev_no}? This permanently removes its MinIO source and artifacts.`
+    );
+    if (!approved) return;
+    setError('');
+    setDeletingId(revision.revision_id);
+    try {
+      await deleteDocRevision(docId, revision.revision_id);
+      const fresh = await listDocRevisions(docId);
+      setItems(revisionRows(fresh));
+    } catch (deleteError) {
+      setError(
+        deleteError?.userMessage
+        || deleteError?.detail
+        || deleteError?.message
+        || 'Failed to delete the document version.'
+      );
+    } finally {
+      setDeletingId(null);
     }
   };
 
@@ -102,7 +143,7 @@ export default function VersionManagerModal({ open, docId, docTitle, onClose }) 
         <div className="kb-ver-header">
           <div className="kb-ver-title">Version Management</div>
           <div className="kb-ver-sub">{docTitle || `Doc ${docId}`}</div>
-          <button className="kb-ver-close" type="button" onClick={onClose}>
+          <button className="kb-ver-close" type="button" onClick={onClose} aria-label="Close">
             ×
           </button>
         </div>
@@ -110,13 +151,15 @@ export default function VersionManagerModal({ open, docId, docTitle, onClose }) 
         <div className="kb-ver-actions">
           <input ref={fileRef} type="file" style={{ display: 'none' }} onChange={onUpload} />
           <button type="button" className="kb-ver-btn" onClick={onUploadClick}>
-            ??버전 ?�로??          </button>
+            Upload New Version
+          </button>
           {loading && <span className="kb-ver-loading">Loading...</span>}
         </div>
+        {error && <div className="kb-ver-error" role="alert">{error}</div>}
 
         <div className="kb-ver-list">
           {ordered.length === 0 ? (
-            <div className="kb-ver-empty">버전???�습?�다.</div>
+            <div className="kb-ver-empty">No versions available.</div>
           ) : (
             ordered.map((r) => (
               <div
@@ -130,6 +173,26 @@ export default function VersionManagerModal({ open, docId, docTitle, onClose }) 
                 <div className="kb-ver-rev">v{r.rev_no}</div>
                 <div className="kb-ver-name">{r.file_name || `rev ${r.rev_no}`}</div>
                 <div className="kb-ver-date">{formatDate(r.created_at)}</div>
+                <button
+                  type="button"
+                  className="kb-ver-delete"
+                  disabled={
+                    loading
+                    || deletingId != null
+                    || ordered.length <= 1
+                  }
+                  title={
+                    ordered.length <= 1
+                      ? 'The last version cannot be deleted.'
+                      : Boolean(r.is_current)
+                        ? 'Delete this version and promote the newest remaining version.'
+                        : 'Delete this version permanently'
+                  }
+                  onMouseDown={(e) => e.stopPropagation()}
+                  onClick={onDeleteRevision(r)}
+                >
+                  {deletingId === r.revision_id ? 'Deleting...' : 'Delete'}
+                </button>
               </div>
             ))
           )}

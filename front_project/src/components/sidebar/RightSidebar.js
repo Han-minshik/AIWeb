@@ -21,8 +21,36 @@ import {
   splitPathHint,
 } from './rightSidebarUtils';
 import { dispatchOpenDocTab, readOpenDocTabDetail } from '../../utils/openDocTab';
+import { resolveAiDocumentIds } from '../../services/docs/docService';
 
-const API_BASE = process.env.REACT_APP_API_BASE || 'http://localhost:8001';
+const API_BASE = import.meta.env.VITE_API_BASE || '/api';
+
+function decodeJwtPayload(token) {
+  if (!token || typeof token !== 'string') return null;
+  try {
+    const part = token.split('.')[1];
+    if (!part) return null;
+    const normalized = part.replace(/-/g, '+').replace(/_/g, '/');
+    const padded = normalized.padEnd(normalized.length + ((4 - (normalized.length % 4)) % 4), '=');
+    return JSON.parse(atob(padded));
+  } catch {
+    return null;
+  }
+}
+
+function getCurrentUserIdForQa() {
+  let token = null;
+  try {
+    token = typeof window !== 'undefined' ? localStorage.getItem('access_token') : null;
+  } catch {}
+  const tokenUserId = decodeJwtPayload(token)?.sub;
+  if (tokenUserId != null && tokenUserId !== '') return String(tokenUserId);
+  try {
+    return (typeof window !== 'undefined' && localStorage.getItem('x_user_id')) || '1';
+  } catch {
+    return '1';
+  }
+}
 
 export default function RightSidebar({ rightOpen, onToggle }) {
   const { kbId, kbName, selectedDocIds } = useKB();
@@ -31,7 +59,7 @@ export default function RightSidebar({ rightOpen, onToggle }) {
   const [messages, setMessages] = useState([]);
   const [sessionId, setSessionId] = useState(null);
   const [source, setSource] = useState(null);
-  const [vault, setVault] = useState({ kbId: null, name: '' });
+  const [vault, setVault] = useState({ kbId: null, name: '', itemTypeCode: null, itemTypeCodes: [], kbType: '' });
   const [activeDoc, setActiveDoc] = useState(null);
   const [bookmarkDocIds, setBookmarkDocIds] = useState([]);
 
@@ -125,7 +153,13 @@ export default function RightSidebar({ rightOpen, onToggle }) {
     if (!kbId) return;
     setVault((prev) => {
       if (prev.kbId === kbId && (prev.name || '') === (kbName || '')) return prev;
-      return { kbId, name: kbName || `KB ${kbId}` };
+      return {
+        kbId,
+        name: kbName || `KB ${kbId}`,
+        itemTypeCode: prev.itemTypeCode ?? null,
+        itemTypeCodes: prev.itemTypeCodes || [],
+        kbType: prev.kbType || '',
+      };
     });
     setSource((prev) => prev || 'vault');
   }, [kbId, kbName]);
@@ -189,9 +223,25 @@ export default function RightSidebar({ rightOpen, onToggle }) {
       const d = e?.detail || {};
       const kid = d.kbId ?? null;
       const name = d.name ?? '';
+      const itemTypeCodes = (d.itemTypeCodes ?? d.item_type_codes ?? [])
+        .map(Number)
+        .filter(Number.isFinite);
+      const rawItemTypeCode = d.itemTypeCode ?? d.item_type_code;
+      const parsedItemTypeCode = Number(rawItemTypeCode);
+      const itemTypeCode =
+        rawItemTypeCode != null && rawItemTypeCode !== '' && Number.isFinite(parsedItemTypeCode)
+          ? parsedItemTypeCode
+          : null;
+      const kbType = String(d.kbType ?? d.kb_type ?? '').trim().toLowerCase();
       if (kid == null) return;
 
-      setVault({ kbId: kid, name: name || `KB ${kid}` });
+      setVault({
+        kbId: kid,
+        name: name || `KB ${kid}`,
+        itemTypeCode,
+        itemTypeCodes,
+        kbType,
+      });
       setSource((prev) => prev || 'vault');
     };
     window.addEventListener('kb:vault-select', onVaultSelect);
@@ -210,13 +260,17 @@ export default function RightSidebar({ rightOpen, onToggle }) {
         null;
       const title = d.title ?? '';
       const tabType = d.type ?? d.tabType ?? d.kind ?? null;
+      const isPersonal =
+        d.isPersonal === true ||
+        String(d.kbType ?? d.kb_type ?? '').trim().toLowerCase() === 'personal' ||
+        String(d.uploadMode ?? d.upload_mode ?? '').trim().toLowerCase() === 'personal';
 
       if ((!docId && !objectId) || (tabType && tabType !== 'doc')) {
         setActiveDoc(null);
         setSource((prev) => (prev === 'activeDoc' ? null : prev));
         return;
       }
-      setActiveDoc({ docId: docId ?? objectId, objectId: objectId ?? docId, title });
+      setActiveDoc({ docId: docId ?? objectId, objectId: objectId ?? docId, title, isPersonal });
     };
     window.addEventListener('open-doc-tab', onOpenDoc);
     return () => window.removeEventListener('open-doc-tab', onOpenDoc);
@@ -246,7 +300,10 @@ export default function RightSidebar({ rightOpen, onToggle }) {
   const toAbsUrl = useCallback((u) => {
     if (!u) return '';
     if (/^https?:\/\//i.test(u) || /^data:/i.test(u)) return u;
-    return `${API_BASE}${u.startsWith('/') ? u : `/${u}`}`;
+    const path = u.startsWith('/') ? u : `/${u}`;
+    const base = String(API_BASE || '').replace(/\/+$/, '');
+    if (path === base || path.startsWith(`${base}/`)) return path;
+    return `${base}${path}`;
   }, []);
 
   const normalizeRefs = useCallback(
@@ -881,7 +938,9 @@ export default function RightSidebar({ rightOpen, onToggle }) {
       role: sender === 'user' ? 'user' : 'assistant',
       content: textVal,
       meta: m.meta || {},
-      images: m.images || m.image_urls || m.imageUrls || [],
+      images: Array.isArray(m?.meta?.images)
+        ? m.meta.images
+        : m.images || m.image_urls || m.imageUrls || [],
       sources: Array.isArray(m?.meta?.sources) ? m.meta.sources : m.sources || [],
       thumb_b64: m?.meta?.thumb_b64,
       thumb_mime: m?.meta?.thumb_mime,
@@ -921,9 +980,6 @@ export default function RightSidebar({ rightOpen, onToggle }) {
       const appType = d.appType ?? null;
       const appId = d.appId ?? null;
       const agentId = d.agentId ?? null;
-      const sessionKbName = d.kbName ?? '';
-      const sessionSelectedDocIds = Array.isArray(d.selectedDocIds) ? d.selectedDocIds : [];
-
       const meta = resolveAgent(appType, agentId, appId);
       setMode(meta.mode);
       setSelectedAgent(
@@ -935,10 +991,6 @@ export default function RightSidebar({ rightOpen, onToggle }) {
       );
 
       setSessionId(sid);
-      if (sessionKbName === 'Bookmarks' && sessionSelectedDocIds.length) {
-        setSource('bookmark');
-        setBookmarkDocIds(sessionSelectedDocIds);
-      }
       stoppedRef.current = false;
       activeRunIdRef.current = null;
       streamingMsgIdRef.current = null;
@@ -1053,18 +1105,33 @@ export default function RightSidebar({ rightOpen, onToggle }) {
     return () => window.removeEventListener('qa:feedback-status', onFbStatus);
   }, []);
 
+  const resolveAiIdsForQa = useCallback(async (objectIds = []) => {
+    const ids = (Array.isArray(objectIds) ? objectIds : [objectIds])
+      .map((v) => Number(v))
+      .filter((v) => Number.isFinite(v));
+    if (!ids.length) return { values: [], missing: [] };
+
+    const res = await resolveAiDocumentIds(ids);
+    const rows = Array.isArray(res?.items) ? res.items : [];
+    const byObjectId = new Map(
+      rows
+        .map((row) => [Number(row?.object_id), String(row?.ai_document_id || '').trim()])
+        .filter(([objectId, aiDocumentId]) => Number.isFinite(objectId) && Boolean(aiDocumentId))
+    );
+
+    return {
+      values: ids.map((objectId) => byObjectId.get(objectId)).filter(Boolean),
+      missing: ids.filter((objectId) => !byObjectId.has(objectId)),
+    };
+  }, []);
+
   const submitText = useCallback(
-    (rawText, opts = {}) => {
+    async (rawText, opts = {}) => {
       const q = (String(rawText ?? '') || '').replace(/\r\n/g, '\n').trimEnd();
       if (!q) return;
 
       const forcedVault =
         opts?.forceVault && typeof opts.forceVault === 'object' ? opts.forceVault : null;
-
-      if (selectedAgent === 'Deep Research') {
-        window.alert('Deep Research is not implemented yet.');
-        return;
-      }
 
       stoppedRef.current = false;
       const runId = `run-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
@@ -1096,10 +1163,20 @@ export default function RightSidebar({ rightOpen, onToggle }) {
 
       const isGeneralQA = selectedAgent === 'General QA';
       const history = buildRecentHistory();
-      const sourceForSubmit = forcedVault ? 'vault' : effectiveSource;
+      const sourceForSubmitRaw = forcedVault ? 'vault' : effectiveSource;
       const vaultForSubmit = forcedVault
-        ? { kbId: forcedVault.kbId ?? null, name: forcedVault.name || '' }
+        ? {
+            kbId: forcedVault.kbId ?? null,
+            name: forcedVault.name || '',
+            itemTypeCode: forcedVault.itemTypeCode ?? forcedVault.item_type_code ?? null,
+            itemTypeCodes: forcedVault.itemTypeCodes ?? forcedVault.item_type_codes ?? [],
+            kbType: String(forcedVault.kbType ?? forcedVault.kb_type ?? '').trim().toLowerCase(),
+          }
         : vault;
+      const isPersonalVault =
+        String(vaultForSubmit?.kbType || '').trim().toLowerCase() === 'personal';
+      const sourceForSubmit =
+        sourceForSubmitRaw === 'vault' && isPersonalVault ? 'personal' : sourceForSubmitRaw;
 
       if (!isGeneralQA && mode === 'rag' && !sourceForSubmit) {
         window.alert('Please select KB first from the right KB selection chip.');
@@ -1114,6 +1191,31 @@ export default function RightSidebar({ rightOpen, onToggle }) {
         ? null
         : mode === 'rag' && sourceForSubmit === 'vault'
           ? vaultForSubmit?.kbId ?? null
+          : null;
+      const ragUserId =
+        !isGeneralQA &&
+        mode === 'rag' &&
+        (sourceForSubmit === 'personal' || (sourceForSubmit === 'activeDoc' && activeDoc?.isPersonal))
+          ? getCurrentUserIdForQa()
+          : null;
+      const itemTypeCodes =
+        !isGeneralQA &&
+        mode === 'rag' &&
+        (sourceForSubmit === 'vault' || sourceForSubmit === 'personal')
+          ? (vaultForSubmit?.itemTypeCodes ?? vaultForSubmit?.item_type_codes ?? [])
+              .map(Number)
+              .filter(Number.isFinite)
+          : [];
+      const rawItemTypeCode = vaultForSubmit?.itemTypeCode ?? vaultForSubmit?.item_type_code;
+      const parsedItemTypeCode = Number(rawItemTypeCode);
+      const itemTypeCode =
+        !isGeneralQA &&
+        mode === 'rag' &&
+        sourceForSubmit === 'vault' &&
+        rawItemTypeCode != null &&
+        rawItemTypeCode !== '' &&
+        Number.isFinite(parsedItemTypeCode)
+          ? parsedItemTypeCode
           : null;
 
       const docIdSingle = isGeneralQA
@@ -1138,6 +1240,28 @@ export default function RightSidebar({ rightOpen, onToggle }) {
             : []
           : [];
 
+      let qaDocId = docIdSingle;
+      let qaSelectedDocIds = selectedDocIdsPayload;
+
+      if (!isGeneralQA && mode === 'rag' && sourceForSubmit === 'activeDoc' && docIdSingle != null) {
+        const resolved = await resolveAiIdsForQa([docIdSingle]);
+        qaDocId = resolved.values[0] || null;
+        if (!qaDocId) {
+          window.alert('AI document ID is not available for the selected document.');
+          return;
+        }
+      }
+
+      if (!isGeneralQA && mode === 'rag' && sourceForSubmit === 'bookmark' && selectedDocIdsPayload.length) {
+        const resolved = await resolveAiIdsForQa(selectedDocIdsPayload);
+        qaSelectedDocIds = resolved.values;
+        qaDocId = qaSelectedDocIds[0] || null;
+        if (!qaSelectedDocIds.length) {
+          window.alert('AI document IDs are not available for the selected bookmarks.');
+          return;
+        }
+      }
+
       let kbNameOut = '';
       if (!isGeneralQA && mode === 'rag') {
         if (sourceForSubmit === 'vault') kbNameOut = vaultForSubmit?.name || '';
@@ -1159,10 +1283,14 @@ export default function RightSidebar({ rightOpen, onToggle }) {
             useStream,
             appType: selectedAgent || 'KB Question & Answer',
             kbId: isGeneralQA ? undefined : ragKbId ?? undefined,
-            docId: isGeneralQA ? undefined : docIdSingle ?? undefined,
+            userId: isGeneralQA ? undefined : ragUserId ?? undefined,
+            user_id: isGeneralQA ? undefined : ragUserId ?? undefined,
+            itemTypeCode: isGeneralQA ? undefined : itemTypeCode ?? undefined,
+            itemTypeCodes: isGeneralQA || !itemTypeCodes.length ? undefined : itemTypeCodes,
+            docId: isGeneralQA ? undefined : qaDocId ?? undefined,
             kbName: isGeneralQA ? undefined : kbNameOut || undefined,
             selectedDocIds:
-              isGeneralQA ? undefined : selectedDocIdsPayload.length ? selectedDocIdsPayload : undefined,
+              isGeneralQA ? undefined : qaSelectedDocIds.length ? qaSelectedDocIds : undefined,
             source: isGeneralQA ? undefined : sourceForSubmit || undefined,
             engine: 'rag',
             sessionId: sessionId || null,
@@ -1185,6 +1313,7 @@ export default function RightSidebar({ rightOpen, onToggle }) {
       sessionId,
       scrollToBottom,
       buildRecentHistory,
+      resolveAiIdsForQa,
     ]
   );
 
@@ -1194,6 +1323,7 @@ export default function RightSidebar({ rightOpen, onToggle }) {
       page,
       title,
       objectId = null,
+      aiDocumentId = null,
       docTitle = null,
       docRelPath = null,
       docSubPath = null,
@@ -1201,10 +1331,11 @@ export default function RightSidebar({ rightOpen, onToggle }) {
       docStoredPath = null,
       docBranchType = null
     ) => {
-      if (!docId && !objectId) return;
+      if (!docId && !objectId && !aiDocumentId) return;
             dispatchOpenDocTab({
         docId,
         objectId: objectId ?? null,
+        aiDocumentId: aiDocumentId ?? null,
         page,
         title,
         docTitle: docTitle || title,
@@ -1323,11 +1454,19 @@ export default function RightSidebar({ rightOpen, onToggle }) {
                   try {
                     window.dispatchEvent(
                       new CustomEvent('kb:vault-force-select', {
-                        detail: { name: forcedKbName },
+                        detail: {
+                          name: forcedKbName,
+                          onResolved: (selectedVault) => {
+                            if (!selectedVault) {
+                              window.alert(`Unable to select KB: ${forcedKbName}`);
+                              return;
+                            }
+                            submitText(q, { forceVault: selectedVault });
+                          },
+                        },
                       })
                     );
                   } catch {}
-                  submitText(q, { forceVault: { name: forcedKbName } });
                   return;
                 }
                 submitText(q);

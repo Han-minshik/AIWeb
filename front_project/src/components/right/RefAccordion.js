@@ -60,6 +60,12 @@ const getObjectId = (it = {}) =>
 const getDocId = (it = {}) =>
   toInt(pickFirst(it.docId, it.doc_id, it.doc_master_id, it.docMasterId));
 
+const getAiDocumentId = (it = {}) => {
+  const raw = pickFirst(it.aiDocumentId, it.ai_document_id, it.aid, it.meta?.aiDocumentId, it.meta?.ai_document_id, it.meta?.aid);
+  const s = String(raw || '').trim();
+  return s || null;
+};
+
 const getFileRight = (it = {}) =>
   normalizeExt(pickFirst(it.docFileRight, it.file_right, it.fileRight));
 
@@ -93,7 +99,8 @@ const buildGroupKey = (it = {}) => {
   const title = String(getDocTitle(it, 'Document')).trim().toLowerCase();
   const objectId = getObjectId(it);
   const docId = getDocId(it);
-  const idKey = objectId != null ? `oid:${objectId}` : docId != null ? `did:${docId}` : 'id:none';
+  const aiDocumentId = getAiDocumentId(it);
+  const idKey = objectId != null ? `oid:${objectId}` : docId != null ? `did:${docId}` : aiDocumentId ? `aid:${aiDocumentId}` : 'id:none';
   const p = readPath(it);
   const pathKey = joinPath(p.rel, p.sub).toLowerCase() || 'path:none';
   const storedPath = String(getStoredPath(it) || '').toLowerCase() || 'stored:none';
@@ -109,6 +116,7 @@ const pickBestCandidate = (list = [], fallbackTitle = 'Document') => {
   const scored = arr.map((it) => {
     const objectId = getObjectId(it);
     const docId = getDocId(it);
+    const aiDocumentId = getAiDocumentId(it);
     const docTitle = getDocTitle(it, fallbackTitle);
     const fileRight = getFileRight(it);
     const storedPath = getStoredPath(it);
@@ -118,7 +126,7 @@ const pickBestCandidate = (list = [], fallbackTitle = 'Document') => {
     const page = toInt(it.page) || 1;
 
     let score = 0;
-    if (objectId != null || docId != null) score += 100;
+    if (objectId != null || docId != null || aiDocumentId) score += 100;
     if (fileRight === 'pdf') score += 30;
     else if (fileRight === 'md') score += 20;
     if (pathText) score += 10;
@@ -131,6 +139,7 @@ const pickBestCandidate = (list = [], fallbackTitle = 'Document') => {
       score,
       objectId,
       docId,
+      aiDocumentId,
       docTitle,
       page,
       docRelPath: p.rel,
@@ -202,12 +211,13 @@ export default function RefAccordion({
       const picked = pickBestCandidate(narrowed.length ? narrowed : base, title);
       if (!picked) return;
 
-      if (picked.docId != null || picked.objectId != null) {
+      if (picked.docId != null || picked.objectId != null || picked.aiDocumentId) {
         openDoc?.(
           picked.docId,
           picked.page,
           picked.docTitle || title,
           picked.objectId,
+          picked.aiDocumentId,
           picked.docTitle,
           picked.docRelPath ?? null,
           picked.docSubPath ?? null,

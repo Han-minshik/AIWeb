@@ -1,27 +1,78 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <mapper namespace="notifications">
   <query id="list_notifications"><![CDATA[
-SELECT id, user_id, kind, severity, title, created_at, read_at
+SELECT
+  id,
+  user_id,
+  kind,
+  severity,
+  title,
+  body,
+  link_url,
+  is_read,
+  read_at,
+  created_at
 FROM notifications
-WHERE user_id=%s AND (%s=0 OR read_at IS NULL)
-ORDER BY created_at DESC
+WHERE user_id=%s
+  AND (%s=FALSE OR (is_read=FALSE AND read_at IS NULL))
+ORDER BY created_at DESC, id DESC
+LIMIT %s OFFSET %s
+  ]]></query>
+
+  <query id="count_notifications"><![CDATA[
+SELECT COUNT(*) AS cnt
+FROM notifications
+WHERE user_id=%s
+  AND (%s=FALSE OR (is_read=FALSE AND read_at IS NULL))
   ]]></query>
 
   <query id="unread_count"><![CDATA[
 SELECT COUNT(*) AS cnt
 FROM notifications
-WHERE user_id=%s AND read_at IS NULL
+WHERE user_id=%s AND is_read=FALSE AND read_at IS NULL
   ]]></query>
 
   <query id="mark_read_prefix"><![CDATA[
 UPDATE notifications
-SET read_at=NOW()
+SET is_read=TRUE,
+    read_at=CURRENT_TIMESTAMP
 WHERE user_id=%s AND id IN
   ]]></query>
 
+  <query id="mark_all_read"><![CDATA[
+UPDATE notifications
+SET is_read=TRUE,
+    read_at=CURRENT_TIMESTAMP
+WHERE user_id=%s
+  AND is_read=FALSE
+  AND read_at IS NULL
+  ]]></query>
+
+  <query id="delete_all"><![CDATA[
+DELETE FROM notifications
+WHERE user_id=%s
+  ]]></query>
+
+  <query id="cleanup_expired"><![CDATA[
+DELETE FROM notifications
+WHERE created_at < CURRENT_TIMESTAMP - INTERVAL '1 day'
+  ]]></query>
+
+  <query id="find_recent_duplicate"><![CDATA[
+SELECT id
+FROM notifications
+WHERE user_id=%s
+  AND kind=%s
+  AND severity=%s
+  AND title=%s
+  AND COALESCE(body, '') = COALESCE(%s, '')
+  AND created_at >= CURRENT_TIMESTAMP - INTERVAL '1 day'
+ORDER BY id DESC
+LIMIT 1
+  ]]></query>
+
   <query id="insert_notification"><![CDATA[
-INSERT INTO notifications (user_id, kind, title, body, severity)
-VALUES (%s,'system',%s,%s,%s)
+INSERT INTO notifications (user_id, kind, title, body, severity, is_read, created_at)
+VALUES (%s,%s,%s,%s,%s,FALSE,CURRENT_TIMESTAMP)
   ]]></query>
 </mapper>
-

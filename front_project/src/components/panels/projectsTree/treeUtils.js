@@ -58,6 +58,8 @@ export const getFileIcon = (node) => {
   return textFileIcon;
 };
 
+export const usesGenericTextFileIcon = (node) => getFileIcon(node) === textFileIcon;
+
 export function toId(v) {
   return Number(v);
 }
@@ -90,6 +92,10 @@ export function normalizeNode(node) {
   const getId = (n) => n?.id ?? n?.node_id;
   const getName = (n) => n?.name ?? n?.title ?? `Node ${getId(n)}`;
   const getChildren = (n) => n?.children || [];
+  const docStatus = String(node?.doc_status ?? node?.docStatus ?? node?.meta?.doc_status ?? node?.meta?.docStatus ?? '')
+    .trim()
+    .toLowerCase();
+  const disabled = Boolean(node?.disabled) || ['deleted_pending', 'inactive_path_missing'].includes(docStatus);
 
   const isFolder = (n) => {
     if (typeof n?.is_folder === 'boolean') return n.is_folder;
@@ -105,7 +111,12 @@ export function normalizeNode(node) {
     node_type: node?.node_type ?? node?.kind,
     is_folder: isFolder(node),
     parent: node?.parent ?? node?.parent_id ?? null,
-    meta: node?.meta || {},
+    disabled,
+    doc_status: docStatus,
+    meta: {
+      ...(node?.meta || {}),
+      doc_status: docStatus || node?.meta?.doc_status,
+    },
     children: (getChildren(node) || []).map(normalizeNode),
   };
 }

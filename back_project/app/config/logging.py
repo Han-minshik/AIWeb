@@ -26,16 +26,17 @@ def setup_logging() -> None:
     stream_handler.setLevel(level)
     stream_handler.setFormatter(fmt)
 
-    file_handler = RotatingFileHandler(
-        file_path,
-        maxBytes=5 * 1024 * 1024,
-        backupCount=5,
-        encoding="utf-8",
-    )
-    file_handler.setLevel(level)
-    file_handler.setFormatter(fmt)
-
     root.setLevel(level)
     root.addHandler(stream_handler)
-    root.addHandler(file_handler)
-
+    try:
+        file_handler = RotatingFileHandler(
+            file_path,
+            maxBytes=5 * 1024 * 1024,
+            backupCount=5,
+            encoding="utf-8",
+        )
+        file_handler.setLevel(level)
+        file_handler.setFormatter(fmt)
+        root.addHandler(file_handler)
+    except OSError:
+        root.warning("File logging disabled; cannot open %s", file_path)

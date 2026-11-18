@@ -1,4 +1,4 @@
-const API_BASE = process.env.REACT_APP_API_BASE || 'http://localhost:8001';
+const API_BASE = import.meta.env.VITE_API_BASE || '/api';
 
 function authHeaders() {
   return {
@@ -9,7 +9,7 @@ function authHeaders() {
 
 export async function fetchDocAsText(docId) {
   const url = `${API_BASE}/docs/${docId}/download`;
-  const res = await fetch(url, { headers: authHeaders() });
+  const res = await fetch(url, { headers: authHeaders(), credentials: 'include' });
   if (!res.ok) return null;
 
   const ct = (res.headers.get('content-type') || '').toLowerCase();

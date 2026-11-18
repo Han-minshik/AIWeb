@@ -6,7 +6,8 @@ from typing import Optional
 from fastapi import HTTPException, Body, Response, Request, Depends
 from pydantic import BaseModel
 
-from app.repositories.common import fetch_one, execute
+from app.repositories.common import fetch_all, fetch_one, execute
+from app.services.common.rag_token_service import create_entry_user_token
 from app.core.auth import (
     create_access_token,
     get_current_user,
@@ -31,25 +32,19 @@ def _user_agent(req: Request) -> str:
 
 def _log_access(
     *,
-    org_id: Optional[int],
     user_id: Optional[int],
     action: str,
     req: Request,
-    target_type: Optional[str] = None,
-    target_pk: Optional[int] = None,
 ) -> None:
     try:
         execute(
             """
-            INSERT INTO access_logs (org_id, user_id, action, target_type, target_pk, ip_addr, user_agent)
-            VALUES (%s, %s, %s, %s, %s, %s, %s)
+            INSERT INTO access_logs (user_id, action, ip_addr, user_agent)
+            VALUES (%s, %s, %s, %s)
             """,
             (
-                org_id,
                 user_id,
                 action,
-                target_type,
-                target_pk,
                 _client_ip(req),
                 _user_agent(req),
             ),
@@ -64,9 +59,22 @@ def login(payload: LoginIn = Body(...), response: Response = None, request: Requ
 
     row = fetch_one(
         """
-        SELECT user_id, org_id, username, password_hash, full_name, email, is_admin, is_active
-          FROM users
-         WHERE username=%s
+        SELECT
+            u.user_id,
+            u.username,
+            u.password_hash,
+            u.full_name,
+            u.email,
+            u.is_admin,
+            u.is_active,
+            u.group_id,
+            g.name AS group_name,
+            u.position_id,
+            p.name AS position
+          FROM users u
+          LEFT JOIN org_groups g ON g.group_id = u.group_id
+          LEFT JOIN positions p ON p.position_id = u.position_id
+         WHERE u.username=%s
         """,
         (user_key,),
     )
@@ -79,26 +87,30 @@ def login(payload: LoginIn = Body(...), response: Response = None, request: Requ
     if (row["password_hash"] or "").lower() != hashed.lower():
         raise HTTPException(status_code=401, detail="비밀번호 불일치")
 
-    token = create_access_token(str(row["user_id"]))
+    token = create_access_token(
+        str(row["user_id"]),
+        is_admin=bool(row.get("is_admin", 0)),
+        group_id=row.get("group_id"),
+        group_name=row.get("group_name") or "",
+        is_active=bool(row.get("is_active", 0)),
+        position_id=row.get("position_id"),
+        position=row.get("position") or "",
+    )
 
     if response is not None:
         set_access_cookie(response, token)
 
     if request is not None:
         _log_access(
-            org_id=row.get("org_id"),
             user_id=row.get("user_id"),
             action="LOGIN",
             req=request,
-            target_type="AUTH",
-            target_pk=None,
         )
 
     return {
         "access_token": token,
         "user": {
             "user_id": row["user_id"],
-            "org_id": row["org_id"],
             "username": row["username"],
             "full_name": row["full_name"],
             "email": row["email"],
@@ -111,12 +123,9 @@ def logout(response: Response, request: Request):
     try:
         current = get_current_user(request)  
         _log_access(
-            org_id=current.get("org_id"),
             user_id=current.get("user_id"),
             action="LOGOUT",
             req=request,
-            target_type="AUTH",
-            target_pk=None,
         )
     except Exception:
         pass
@@ -128,7 +137,6 @@ def logout(response: Response, request: Request):
 def me(current_user: dict = Depends(get_current_user)):
     return {
         "user_id": current_user["user_id"],
-        "org_id": current_user["org_id"],
         "username": current_user["username"],
         "full_name": current_user["full_name"],
         "email": current_user["email"],
@@ -142,3 +150,32 @@ def admin_check(current_user: dict = Depends(get_current_user)):
 
 def users_me_alias(current_user: dict = Depends(get_current_user)):
     return me(current_user)
+
+def _entry_groups(user_id: int) -> list[str]:
+    rows = fetch_all(
+        """
+        SELECT DISTINCT g.name
+          FROM group_members gm
+          JOIN org_groups g ON g.group_id = gm.group_id
+         WHERE gm.user_id=%s
+           AND gm.is_active=TRUE
+           AND g.is_active=TRUE
+         ORDER BY g.name
+        """,
+        (int(user_id),),
+    )
+    return [str(row.get("name")) for row in rows if row.get("name")]
+
+
+def entry_token(target: str, current_user: dict = Depends(get_current_user)):
+    target = str(target or "").strip().lower()
+    if target != "deep-research":
+        raise HTTPException(status_code=400, detail="Unsupported entry token target")
+
+    token_user = dict(current_user)
+    token_user["groups"] = _entry_groups(int(current_user["user_id"]))
+    try:
+        token = create_entry_user_token(token_user, target)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    return {"token": token, "token_type": "bearer"}

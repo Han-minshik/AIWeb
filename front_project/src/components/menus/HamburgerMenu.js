@@ -1,6 +1,9 @@
 import React, { useEffect, useRef } from "react";
 import { createPortal } from "react-dom";
 
+const AI_STUDIO_URL = import.meta.env.VITE_AI_STUDIO_URL || "http://localhost:9090";
+const RTS_URL = import.meta.env.VITE_RTS_URL || "http://localhost:35176";
+
 export default function HamburgerMenu({ open, onClose }) {
   const menuRef = useRef(null);
 
@@ -22,10 +25,22 @@ export default function HamburgerMenu({ open, onClose }) {
 
   if (!open) return null;
 
-  const items = ["SE KB", "Requirements", "Ontology"];
+  const items = ["AI Studio", "RTS"];
 
-  const handle = () => {
-    window.alert("This page is not ready yet.");
+  const handle = (label) => {
+    if (label === "AI Studio") {
+      window.open(
+        AI_STUDIO_URL,
+        "_blank", 
+        "noopener, noreferrer"
+      );
+    } else if (label === "RTS") {
+      window.open(
+        RTS_URL,
+        "_blank",
+        "noopener, noreferrer"
+      );
+    }
     onClose?.();
   };
 
@@ -42,7 +57,7 @@ export default function HamburgerMenu({ open, onClose }) {
           <li
             key={label}
             className="kb-menu_item"
-            onClick={() => handle()}
+            onClick={() => handle(label)}
           >
             {label}
           </li>

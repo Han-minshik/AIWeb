@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from typing import Any, Iterable, Mapping, Sequence, Tuple, Optional
 
-from app.utils.db import get_connection 
+from app.utils.db import pooled_connection
 
 __all__ = [
     "fetch_all",
@@ -38,51 +38,32 @@ def loads_json_or_none(s: Any) -> Any:
         return s
 
 def fetch_all(sql: str, params: Sequence[Any] | Tuple[Any, ...] = ()) -> list[dict]:
-    conn = get_connection(autocommit=True)
-    cur = conn.cursor()
-    try:
-        cur.execute(sql, params)
-        rows = cur.fetchall()
-        return list(rows) if rows else []
-    finally:
-        try:
-            cur.close()
-        finally:
-            conn.close()
+    with pooled_connection(autocommit=True) as conn:
+        with conn.cursor() as cur:
+            cur.execute(sql, params)
+            rows = cur.fetchall()
+            return list(rows) if rows else []
 
 def fetch_one(sql: str, params: Sequence[Any] | Tuple[Any, ...] = ()) -> dict | None:
-    conn = get_connection(autocommit=True)
-    cur = conn.cursor()
-    try:
-        cur.execute(sql, params)
-        row = cur.fetchone()
-        return dict(row) if row else None
-    finally:
-        try:
-            cur.close()
-        finally:
-            conn.close()
+    with pooled_connection(autocommit=True) as conn:
+        with conn.cursor() as cur:
+            cur.execute(sql, params)
+            row = cur.fetchone()
+            return dict(row) if row else None
 
 def execute(sql: str, params: Sequence[Any] | Tuple[Any, ...] = (), return_last_id: bool = False) -> int | None:
-    conn = get_connection(autocommit=True)
-    cur = conn.cursor()
-    try:
-        cur.execute(sql, params)
-        last_id = cur.lastrowid
-        return last_id if return_last_id else None
-    finally:
-        try:
-            cur.close()
-        finally:
-            conn.close()
+    with pooled_connection(autocommit=True) as conn:
+        with conn.cursor() as cur:
+            statement = sql
+            if return_last_id and "RETURNING" not in sql.upper():
+                statement = f"{sql.rstrip().rstrip(';')} RETURNING *"
+            cur.execute(statement, params)
+            if not return_last_id:
+                return None
+            row = cur.fetchone()
+            return int(next(iter(row.values()))) if row else None
 
 def executemany(sql: str, param_list: Iterable[Sequence[Any] | Mapping[str, Any]]) -> None:
-    conn = get_connection(autocommit=True)
-    cur = conn.cursor()
-    try:
-        cur.executemany(sql, list(param_list))
-    finally:
-        try:
-            cur.close()
-        finally:
-            conn.close()
+    with pooled_connection(autocommit=True) as conn:
+        with conn.cursor() as cur:
+            cur.executemany(sql, list(param_list))

@@ -1,35 +1,33 @@
 from __future__ import annotations
 
-from typing import Optional
+from fastapi import Depends, HTTPException, Request, status
 
-from fastapi import Depends, Header, HTTPException, status
-from jose import JWTError
-
-from app.core.auth import verify_access_token  
+from app.core.auth import get_token_from_request, verify_access_token
 from app.repositories.common import fetch_one
 
 
-def _require_bearer(authorization: Optional[str]) -> str:
-    if not authorization or not authorization.startswith("Bearer "):
+def _require_token(request: Request) -> str:
+    token = get_token_from_request(request)
+    if not token:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="인증 토큰이 필요합니다. (Authorization: Bearer <token>)",
+            detail="인증 토큰이 필요합니다.",
         )
-    return authorization.split(" ", 1)[1].strip()
+    return token
 
 
-def get_current_user_id(authorization: Optional[str] = Header(None)) -> int:
-    token = _require_bearer(authorization)
-    try:
-        user_id = verify_access_token(token)
-    except JWTError:
-        raise HTTPException(status_code=401, detail="유효하지 않은 토큰")
+def get_current_user_id(request: Request) -> int:
+    token = _require_token(request)
+    user_id = verify_access_token(token)
     if not isinstance(user_id, int):
         try:
             user_id = int(user_id)
         except Exception:
             raise HTTPException(status_code=401, detail="유효하지 않은 사용자 정보")
-    row = fetch_one("SELECT user_id FROM users WHERE user_id=%s", (user_id,))
+    row = fetch_one(
+        "SELECT user_id FROM users WHERE user_id=%s AND is_active=TRUE",
+        (user_id,),
+    )
     if not row:
         raise HTTPException(status_code=401, detail="존재하지 않는 사용자")
     return user_id

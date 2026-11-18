@@ -6,6 +6,9 @@ import RobotIcon from '/src/assets/icons/robot-2-line.svg';
 import AppsIcon from '/src/assets/icons/apps-2-line.svg';
 import QuestionIcon from '/src/assets/icons/question.svg';
 import TrainingIcon from '/src/assets/icons/training.svg';
+import { openEntryApp } from '../../services/auth/authService';
+
+const DEEP_RESEARCH_URL = import.meta.env.VITE_DEEP_RESEARCH_URL || 'http://localhost:3300';
 
 export const ITEMS = [
   { path: '/home', title: 'KB Question & Answer', desc: 'Please refer to the internal/project KB for your answer.', agentId: null },
@@ -75,11 +78,14 @@ export default function AICatalogPanel({ open, onClose, onSelect }) {
   }, [controlled, onClose]);
 
   const handleSelect = useCallback(
-    (it) => {
+    async (it) => {
       if (it.path === '/deep-research') {
-        // window.open('/deep-research', '_blank', 'noopener,noreferrer');
-        window.alert('This page is under preparation.');
         close();
+        try {
+          await openEntryApp(DEEP_RESEARCH_URL, 'deep-research');
+        } catch (error) {
+          console.error('Failed to open Deep Research.', error);
+        }
         return;
       }
 
@@ -162,7 +168,7 @@ export default function AICatalogPanel({ open, onClose, onSelect }) {
         <div className="ai-modal-header">
           <div className="ai-modal-title">Choose Your Agent</div>
           <button className="ai-modal-close" onClick={close} aria-label="Close">
-            ×
+            X
           </button>
         </div>
         <div className="ai-modal-body">

@@ -12,9 +12,7 @@ export default function ChatHero({
   const subtitle =
     agentName === 'General QA'
       ? 'Ask any general question. I will focus on direct answers and practical guidance.'
-      : agentName === 'Deep Research'
-        ? 'Deep Research templates can be added later. This agent is not implemented yet.'
-        : 'I can help you find information within your knowledge base documents, answer questions, and summarize content.';
+      : 'I can help you find information within your knowledge base documents, answer questions, and summarize content.';
 
   return (
     <div className="hero-wrap hero-abs-center">

@@ -38,7 +38,6 @@ function mapAppInfo(raw) {
   // Canonicalize known agent labels in case backend stores different casing.
   if (lower === 'kb question & answer') display = 'KB Question & Answer';
   if (lower === 'general qa') display = 'General QA';
-  if (lower === 'deep research') display = 'Deep Research';
   // General QA sessions are stored with app_id NULL (thus app_type "RAG" from backend list endpoint).
   // We store a marker in selected_kb_name to recover the correct label in history.
   if ((upper === 'RAG' || !upper) && kbName === 'General QA') {
@@ -68,6 +67,7 @@ function normalizeFromSessions(rows) {
       raw_app_type: appInfo.raw_app_type,
       app_id: appInfo.app_id,
       agent_id: appInfo.agent_id,
+      kb_id: r.kb_id ?? r.kbId ?? r.selected_kb_id ?? null,
       kb_name: r.kb_name || r.kbName || '-',
       selected_doc_ids: r.selected_doc_ids ?? r.selectedDocIds ?? null,
       updated_at: r.last_activity_at || r.updated_at || r.lastAt || '',
@@ -189,15 +189,6 @@ export function HistoryProvider({ children }) {
         row?.agent_id ??
         e?.detail?.agentId ??
         null;
-      const selectedDocIds =
-        row?.selected_doc_ids ??
-        e?.detail?.selectedDocIds ??
-        null;
-      const kbName =
-        row?.kb_name ??
-        e?.detail?.kbName ??
-        null;
-
       try {
         const resp = await listMessages(sessionId);
         const msgs = Array.isArray(resp?.items)
@@ -213,8 +204,6 @@ export function HistoryProvider({ children }) {
               appType,
               appId,
               agentId,
-              selectedDocIds,
-              kbName,
               messages: msgs,
             },
           })

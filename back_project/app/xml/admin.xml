@@ -6,41 +6,40 @@ FROM users
 WHERE 1=1
   ]]></query>
 
-  <query id="users_list_base"><![CDATA[
+<query id="users_list_base"><![CDATA[
 SELECT
   user_id AS id,
-  org_id AS org_id,
   username,
   email,
   COALESCE(full_name, '') AS full_name,
   '' AS department,
   '' AS position,
-  COALESCE(is_admin, 0) AS is_admin,
-  COALESCE(is_active, 1) AS is_active
+  COALESCE(is_admin, FALSE) AS is_admin,
+  COALESCE(is_active, TRUE) AS is_active
 FROM users
 WHERE 1=1
   ]]></query>
 
-  <query id="user_detail_by_id"><![CDATA[
-SELECT user_id AS id, username, email, full_name, is_admin, is_active, org_id
+<query id="user_detail_by_id"><![CDATA[
+SELECT user_id AS id, username, email, full_name, is_admin, is_active
 FROM users
 WHERE user_id=%s
   ]]></query>
 
   <query id="insert_user"><![CDATA[
-INSERT INTO users (org_id, username, email, password_hash, full_name, is_admin, is_active)
-VALUES (%s, %s, %s, SHA2(%s,256), %s, %s, 1)
+INSERT INTO users (username, email, password_hash, full_name, is_admin, is_active)
+VALUES (%s, %s, %s, %s, %s, TRUE)
   ]]></query>
 
   <query id="toggle_admin"><![CDATA[
 UPDATE users
-SET is_admin = 1 - is_admin
+SET is_admin = NOT is_admin
 WHERE user_id=%s
   ]]></query>
 
   <query id="reset_password"><![CDATA[
 UPDATE users
-SET password_hash = SHA2(%s,256)
+SET password_hash = %s
 WHERE user_id=%s
   ]]></query>
 
@@ -49,9 +48,8 @@ DELETE FROM users
 WHERE user_id=%s
   ]]></query>
 
-  <query id="access_logs_base"><![CDATA[
-SELECT access_id, org_id, user_id, action, target_type, target_pk, ip_addr, user_agent, created_at
+<query id="access_logs_base"><![CDATA[
+SELECT access_id, user_id, action, ip_addr, user_agent, created_at
 FROM access_logs
   ]]></query>
 </mapper>
-

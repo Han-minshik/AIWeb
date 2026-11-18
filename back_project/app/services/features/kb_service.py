@@ -1,805 +1,39 @@
 from __future__ import annotations
 
-import os
-import logging
-import re
-from typing import Dict, Any, List, Optional, Literal, Tuple, Set
+from datetime import timedelta
+from typing import Any, Dict, List, Literal, Optional, Set, Tuple
 
-from fastapi import HTTPException, Body, Depends, Query, Path
+import httpx
+from fastapi import Body, Depends, HTTPException, Path, Query
 from pydantic import BaseModel, Field
 
-from app.utils.db import fetch_all, fetch_one, execute
+from app.config import settings
 from app.deps.auth_dep import get_current_user_id
-from app.core.config import (
-    DELETE_UPLOADS_ON_RECORD_DELETE,
-    KIWIX_FOLDER_ORDER,
-    SE_KB_ID,
-    UPLOAD_DIR,
+from app.repositories.common import execute, fetch_all, fetch_one
+from app.repositories.transaction import db_transaction
+from app.services import admin_service
+from app.services.features.document_db import (
+    active_group_ids_for_user,
+    as_int,
+    collect_descendants,
+    clean_node_name,
+    ensure_acl,
+    ensure_ai_document_info,
+    enqueue_ai_job,
+    enqueue_ai_metadata_job,
+    find_child_node_by_alias,
+    get_kb_entry,
+    get_node,
+    is_admin,
+    next_item_type_code,
+    next_sort_order,
+    node_policy_matrix,
+    policy_requires_target_group,
+    rel_sub_for_parent,
+    row_has_document_permission,
+    update_subtree_item_type,
 )
-from app.services.common.naming_service import (
-    build_display_name as _build_display_name,
-    normalize_folder_slug as _normalize_folder_slug,
-)
 
-log = logging.getLogger(__name__)
-
-def _make_in_clause(seq: List[int]) -> tuple[str, tuple]:
-    items = list(dict.fromkeys(seq or []))
-    if not items:
-        return "", tuple()
-    return ",".join(["%s"] * len(items)), tuple(items)
-
-
-
-
-def _build_local_folder_path(node_id: int) -> str:
-    parts: List[str] = []
-    current = node_id
-    safety = 0
-    while current is not None and safety < 256:
-        safety += 1
-        row = _fetch_node(current)
-        if not row:
-            break
-        parts.append(_normalize_folder_slug(row.get("name") or ""))
-        current = row.get("parent_id")
-    parts.reverse()
-    return os.path.join(UPLOAD_DIR, *parts)
-
-
-def _is_kiwix_root_path(node_id: int) -> bool:
-    root = _root_node_info(node_id)
-    if not root:
-        return False
-    root_name = str(root.get("name") or "").strip().lower()
-    return "kiwix" in root_name
-
-
-
-def _is_kiwix_root_name(name: Optional[str]) -> bool:
-    root_name = str(name or "").strip().lower()
-    return "kiwix" in root_name
-
-
-def _kiwix_order_rank(name: Optional[str]) -> int:
-    up = str(name or "").upper()
-    for idx, token in enumerate(KIWIX_FOLDER_ORDER):
-        if re.search(rf"(^|[^A-Z0-9]){token}([^A-Z0-9]|$)", up):
-            return idx
-    return len(KIWIX_FOLDER_ORDER)
-
-
-def _kiwix_sort_key(row: Dict[str, Any]):
-    sort_order = int(row.get("sort_order") or 0)
-    name = str(row.get("name") or "").lower()
-    if bool(row.get("is_folder")):
-        return (0, _kiwix_order_rank(row.get("name")), sort_order, name)
-    return (1, sort_order, name)
-
-
-def _natural_name_key(name: Optional[str]) -> Tuple[Tuple[int, Any], ...]:
-    raw = str(name or "").strip().lower()
-    parts = re.split(r"(\d+)", raw)
-    key: List[Tuple[int, Any]] = []
-    for part in parts:
-        if not part:
-            continue
-        if part.isdigit():
-            key.append((0, int(part)))
-        else:
-            key.append((1, part))
-    return tuple(key)
-
-
-def _default_tree_sort_key(row: Dict[str, Any]):
-    return (
-        int(row.get("sort_order") or 0),
-        _natural_name_key(row.get("name")),
-        str(row.get("name") or "").lower(),
-    )
-
-
-def _detect_storage_path_expr() -> str:
-    cols = fetch_all(
-        """
-        SELECT COLUMN_NAME
-          FROM INFORMATION_SCHEMA.COLUMNS
-         WHERE TABLE_SCHEMA = DATABASE()
-           AND TABLE_NAME = 'storage_objects'
-        """
-    )
-    have = {r["COLUMN_NAME"].lower() for r in (cols or [])}
-    for c in ["path", "relative_path", "file_path", "rel_path", "uri", "key", "name"]:
-        if c in have:
-            return "so.`key`" if c == "key" else f"so.{c}"
-    if {"dir", "filename"} <= have:
-        return "CONCAT(so.dir,'/',so.filename)"
-    return "'__NO_PATH__'"
-
-
-def _object_basename(object_id: int, original_name: Optional[str]) -> str:
-    safe_name = (original_name or "").replace(os.sep, "_").strip() or "file"
-    return f"object_{object_id}__{safe_name}"
-
-
-
-def _normalize_rel_prefix(rel: str) -> str:
-    rel = (rel or "").strip().replace("\\", "/").lstrip("/")
-    base = os.path.basename(os.path.abspath(UPLOAD_DIR)).lower()
-    if base and rel.lower() == base:
-        return ""
-    prefix = base + "/"
-    if base and rel.lower().startswith(prefix):
-        return rel[len(prefix):]
-    return rel
-
-
-def _normalize_under_uploads(rel_path: str) -> Optional[str]:
-    if not rel_path:
-        return None
-    uploads_abs = os.path.abspath(UPLOAD_DIR)
-    raw = rel_path.strip()
-    if os.path.isabs(raw):
-        abs_path = os.path.abspath(raw)
-    else:
-        safe_rel = raw.lstrip("/\\")
-        abs_path = os.path.abspath(os.path.join(UPLOAD_DIR, safe_rel))
-    if abs_path == uploads_abs:
-        return None
-    if not abs_path.startswith(uploads_abs + os.sep):
-        return None
-    return abs_path
-
-
-def _delete_files_safely(paths: Set[str]) -> Dict[str, int]:
-    stats = {"attempted": 0, "deleted": 0, "skipped_missing": 0, "skipped_outside": 0, "errors": 0}
-    for rel in paths:
-        stats["attempted"] += 1
-        abs_path = _normalize_under_uploads(rel)
-        if not abs_path:
-            stats["skipped_outside"] += 1
-            log.warning("[kb.nodes:bulk] outside uploads skipped: %s", rel)
-            continue
-        try:
-            if os.path.exists(abs_path):
-                os.remove(abs_path)
-                stats["deleted"] += 1
-                log.info("[kb.nodes:bulk] deleted file: %s", abs_path)
-            else:
-                stats["skipped_missing"] += 1
-                log.info("[kb.nodes:bulk] not found (skip): %s", abs_path)
-        except Exception as e:
-            stats["errors"] += 1
-            log.exception("[kb.nodes:bulk] delete failed: %s (%s)", abs_path, e)
-    return stats
-
-def _get_user_org_admin(user_id: int) -> Dict[str, Any]:
-    row = fetch_one(
-        "SELECT org_id, is_admin FROM users WHERE user_id=%s",
-        (user_id,),
-    )
-    if not row:
-        raise HTTPException(status_code=401, detail="?몄쬆 ?ъ슜???놁쓬")
-    return {"org_id": int(row["org_id"]), "is_admin": int(row["is_admin"] or 0)}
-
-
-def _has_perm(user_id: int, node_id: int, mode: str) -> bool:
-    row = fetch_one(
-        "SELECT fn_acl_can('TREE_NODE', %s, %s, %s) AS ok",
-        (node_id, user_id, mode),
-    )
-    return bool(row and int(row["ok"] or 0) == 1)
-
-
-def _ensure_kb_tree(kb_id: int, user_id: int) -> Dict[str, Any]:
-    u = _get_user_org_admin(user_id)
-    tree = fetch_one(
-        "SELECT tree_id AS kb_id, org_id, name FROM trees WHERE tree_id=%s AND kind='KB'",
-        (kb_id,),
-    )
-    if not tree:
-        raise HTTPException(status_code=404, detail="KB ?몃━ ?놁쓬")
-    if int(tree["org_id"]) != u["org_id"]:
-        raise HTTPException(status_code=403, detail="?ㅻⅨ 議곗쭅??KB")
-
-    if u["is_admin"]:
-        return {"kb_id": int(tree["kb_id"]), "name": tree["name"], "org_id": int(tree["org_id"]), "is_admin": True}
-
-    can_read_any = fetch_one(
-        """
-        SELECT 1 AS ok
-          FROM tree_nodes t
-         WHERE t.tree_id=%s
-           AND fn_acl_can('TREE_NODE', t.node_id, %s, 'r') = 1
-         LIMIT 1
-        """,
-        (kb_id, user_id),
-    )
-    if not can_read_any:
-        raise HTTPException(status_code=403, detail="?쎄린 沅뚰븳 ?놁쓬")
-    return {"kb_id": int(tree["kb_id"]), "name": tree["name"], "org_id": int(tree["org_id"]), "is_admin": False}
-
-
-def _fetch_node(node_id: int) -> Optional[Dict[str, Any]]:
-    return fetch_one(
-        "SELECT node_id, tree_id, parent_id, name, node_type, is_folder, sort_order FROM tree_nodes WHERE node_id=%s",
-        (node_id,),
-    )
-
-
-def _is_folder(tree_id: int, node_id: int) -> bool:
-    row = fetch_one(
-        "SELECT is_folder FROM tree_nodes WHERE tree_id=%s AND node_id=%s",
-        (tree_id, node_id),
-    )
-    return bool(row and int(row["is_folder"] or 0) == 1)
-
-
-def _is_folder_by_type(node_type: Optional[str]) -> int:
-    nt = (node_type or "").upper()
-    return 1 if "FOLDER" in nt else 0
-
-
-def _get_linked_node_id(node_id: int) -> Optional[int]:
-    row = fetch_one(
-        "SELECT linked_node_id FROM node_links WHERE node_id=%s AND link_type='MIRROR' LIMIT 1",
-        (node_id,),
-    )
-    if row and row.get("linked_node_id") is not None:
-        return int(row["linked_node_id"])
-    row = fetch_one(
-        "SELECT node_id FROM node_links WHERE linked_node_id=%s AND link_type='MIRROR' LIMIT 1",
-        (node_id,),
-    )
-    if row and row.get("node_id") is not None:
-        return int(row["node_id"])
-    return None
-
-
-def _link_nodes(a: int, b: int) -> None:
-    if not a or not b or a == b:
-        return
-    execute(
-        "INSERT IGNORE INTO node_links(node_id, linked_node_id, link_type) VALUES(%s,%s,'MIRROR')",
-        (a, b),
-    )
-    execute(
-        "INSERT IGNORE INTO node_links(node_id, linked_node_id, link_type) VALUES(%s,%s,'MIRROR')",
-        (b, a),
-    )
-
-
-def _get_kb_root_linked_node_id(node_id: int) -> Optional[int]:
-    row = fetch_one(
-        "SELECT linked_node_id FROM node_links WHERE node_id=%s AND link_type='KB_ROOT' LIMIT 1",
-        (node_id,),
-    )
-    if row and row.get("linked_node_id") is not None:
-        return int(row["linked_node_id"])
-    row = fetch_one(
-        "SELECT node_id FROM node_links WHERE linked_node_id=%s AND link_type='KB_ROOT' LIMIT 1",
-        (node_id,),
-    )
-    if row and row.get("node_id") is not None:
-        return int(row["node_id"])
-    return None
-
-
-def _link_kb_root(a: int, b: int) -> None:
-    if not a or not b or a == b:
-        return
-    execute(
-        "INSERT IGNORE INTO node_links(node_id, linked_node_id, link_type) VALUES(%s,%s,'KB_ROOT')",
-        (a, b),
-    )
-    execute(
-        "INSERT IGNORE INTO node_links(node_id, linked_node_id, link_type) VALUES(%s,%s,'KB_ROOT')",
-        (b, a),
-    )
-
-
-def _kb_root_pair_for_node(node_id: int) -> tuple[Optional[int], Optional[int]]:
-    cur = node_id
-    while cur is not None:
-        row = fetch_one(
-            "SELECT linked_node_id FROM node_links WHERE node_id=%s AND link_type='KB_ROOT' LIMIT 1",
-            (cur,),
-        )
-        if row and row.get("linked_node_id") is not None:
-            a = int(cur)
-            b = int(row["linked_node_id"])
-            a_tree = fetch_one("SELECT tree_id FROM tree_nodes WHERE node_id=%s", (a,))
-            b_tree = fetch_one("SELECT tree_id FROM tree_nodes WHERE node_id=%s", (b,))
-            if a_tree and b_tree:
-                if int(a_tree["tree_id"]) == SE_KB_ID:
-                    return a, b
-                if int(b_tree["tree_id"]) == SE_KB_ID:
-                    return b, a
-            return None, None
-        row = fetch_one(
-            "SELECT node_id FROM node_links WHERE linked_node_id=%s AND link_type='KB_ROOT' LIMIT 1",
-            (cur,),
-        )
-        if row and row.get("node_id") is not None:
-            a = int(row["node_id"])
-            b = int(cur)
-            a_tree = fetch_one("SELECT tree_id FROM tree_nodes WHERE node_id=%s", (a,))
-            b_tree = fetch_one("SELECT tree_id FROM tree_nodes WHERE node_id=%s", (b,))
-            if a_tree and b_tree:
-                if int(a_tree["tree_id"]) == SE_KB_ID:
-                    return a, b
-                if int(b_tree["tree_id"]) == SE_KB_ID:
-                    return b, a
-            return None, None
-
-        row = fetch_one("SELECT parent_id FROM tree_nodes WHERE node_id=%s", (cur,))
-        if not row or row.get("parent_id") is None:
-            break
-        cur = row["parent_id"]
-    return None, None
-
-
-def _root_node_info(node_id: int) -> Optional[Dict[str, Any]]:
-    cur = node_id
-    while cur is not None:
-        row = fetch_one("SELECT node_id, parent_id, tree_id, name FROM tree_nodes WHERE node_id=%s", (cur,))
-        if not row:
-            return None
-        if row.get("parent_id") is None:
-            return row
-        cur = row["parent_id"]
-    return None
-
-
-def _ensure_kb_root_pair_for_node(node_id: int) -> tuple[Optional[int], Optional[int]]:
-    se_root, kb_root = _kb_root_pair_for_node(node_id)
-    if se_root and kb_root:
-        return se_root, kb_root
-
-    root = _root_node_info(node_id)
-    if not root:
-        return None, None
-    root_id = int(root["node_id"])
-    tree_id = int(root["tree_id"])
-    name = root.get("name")
-
-    if not name or SE_KB_ID <= 0:
-        return None, None
-
-    if tree_id == SE_KB_ID:
-        kb_tree = fetch_one(
-            "SELECT tree_id FROM trees WHERE name=%s AND kind='KB' AND kb_type='admin' LIMIT 1",
-            (name,),
-        )
-        if not kb_tree:
-            return None, None
-        kb_tree_id = int(kb_tree["tree_id"])
-        kb_root_row = fetch_one(
-            "SELECT node_id FROM tree_nodes WHERE tree_id=%s AND parent_id IS NULL AND name=%s LIMIT 1",
-            (kb_tree_id, name),
-        )
-        if not kb_root_row:
-            return None, None
-        kb_root_id = int(kb_root_row["node_id"])
-        _link_kb_root(root_id, kb_root_id)
-        return root_id, kb_root_id
-
-    # from non-SE KB -> find SE KB root by name
-    se_root_row = fetch_one(
-        "SELECT node_id FROM tree_nodes WHERE tree_id=%s AND parent_id IS NULL AND name=%s LIMIT 1",
-        (SE_KB_ID, name),
-    )
-    if not se_root_row:
-        return None, None
-    se_root_id = int(se_root_row["node_id"])
-    _link_kb_root(se_root_id, root_id)
-    return se_root_id, root_id
-
-
-def _ensure_mirror_for_folder(node_id: int, user_id: int) -> Optional[int]:
-    existing = _get_linked_node_id(node_id)
-    if existing:
-        return existing
-
-    row = fetch_one(
-        "SELECT node_id, parent_id, name, node_type, is_folder FROM tree_nodes WHERE node_id=%s",
-        (node_id,),
-    )
-    if not row:
-        return None
-    if not row.get("is_folder"):
-        return None
-
-    mirror_parent = _mirror_parent_for_new_node(row.get("parent_id"), user_id)
-    if mirror_parent is None:
-        return None
-    mirror_tree = fetch_one("SELECT tree_id FROM tree_nodes WHERE node_id=%s", (mirror_parent,))
-    if not mirror_tree:
-        return None
-    mirror_tree_id = int(mirror_tree["tree_id"])
-
-    existing = fetch_one(
-        """
-        SELECT node_id
-          FROM tree_nodes
-         WHERE tree_id=%s AND parent_id <=> %s AND name=%s
-         LIMIT 1
-        """,
-        (mirror_tree_id, mirror_parent, row.get("name")),
-    )
-    if existing and existing.get("node_id"):
-        _link_nodes(int(row["node_id"]), int(existing["node_id"]))
-        return int(existing["node_id"])
-
-    mirror_node_id = execute(
-        """
-        INSERT INTO tree_nodes
-            (tree_id, parent_id, name, node_type, is_folder, sort_order, created_by, created_at, updated_at)
-        VALUES (%s, %s, %s, %s, 1, 0, %s, NOW(), NOW())
-        """,
-        (mirror_tree_id, mirror_parent, row.get("name"), row.get("node_type") or "KB_FOLDER", user_id),
-        True,
-    )
-    _link_nodes(int(row["node_id"]), mirror_node_id)
-    return mirror_node_id
-
-
-def _mirror_parent_for_new_node(parent_id: Optional[int], user_id: Optional[int] = None) -> Optional[int]:
-    if parent_id is None:
-        return None
-    se_root, kb_root = _ensure_kb_root_pair_for_node(parent_id)
-    if not se_root or not kb_root:
-        return None
-    if parent_id == se_root:
-        return kb_root
-    if parent_id == kb_root:
-        return se_root
-    linked = _get_linked_node_id(parent_id)
-    if linked:
-        return linked
-    if user_id:
-        return _ensure_mirror_for_folder(parent_id, user_id)
-    return None
-
-
-def _maybe_create_mirror_node(
-    *,
-    node_id: int,
-    parent_id: Optional[int],
-    name: str,
-    node_type: str,
-    is_folder: int,
-    user_id: int,
-) -> Optional[int]:
-    mirror_parent = _mirror_parent_for_new_node(parent_id, user_id)
-    if mirror_parent is None:
-        return None
-    mirror_tree = fetch_one("SELECT tree_id FROM tree_nodes WHERE node_id=%s", (mirror_parent,))
-    if not mirror_tree:
-        return None
-    mirror_tree_id = int(mirror_tree["tree_id"])
-
-    existing = fetch_one(
-        """
-        SELECT node_id
-          FROM tree_nodes
-         WHERE tree_id=%s AND parent_id <=> %s AND name=%s
-         LIMIT 1
-        """,
-        (mirror_tree_id, mirror_parent, name),
-    )
-    if existing and existing.get("node_id"):
-        _link_nodes(node_id, int(existing["node_id"]))
-        return int(existing["node_id"])
-
-    mirror_node_id = execute(
-        """
-        INSERT INTO tree_nodes
-            (tree_id, parent_id, name, node_type, is_folder, sort_order, created_by, created_at, updated_at)
-        VALUES (%s, %s, %s, %s, %s, 0, %s, NOW(), NOW())
-        """,
-        (mirror_tree_id, mirror_parent, name, node_type, is_folder, user_id),
-        True,
-    )
-    _link_nodes(node_id, mirror_node_id)
-    return mirror_node_id
-
-
-def _ensure_kb_from_folder(
-    *,
-    kb_id: int,
-    node_id: int,
-    parent_id: Optional[int],
-    name: str,
-    user_id: int,
-) -> Optional[int]:
-    if kb_id != SE_KB_ID:
-        return None
-    if parent_id is not None:
-        return None
-    if not name:
-        return None
-
-    if _get_kb_root_linked_node_id(node_id):
-        return None
-
-    tree_row = fetch_one(
-        "SELECT tree_id FROM trees WHERE name=%s AND kind='KB' AND kb_type='admin' LIMIT 1",
-        (name,),
-    )
-    if tree_row and tree_row.get("tree_id"):
-        kb_tree_id = int(tree_row["tree_id"])
-    else:
-        se_tree = fetch_one("SELECT org_id FROM trees WHERE tree_id=%s", (kb_id,)) or {}
-        org_id = int(se_tree.get("org_id") or 1)
-        kb_tree_id = execute(
-            """
-            INSERT INTO trees(org_id, name, kb_type, is_user_kb, kind)
-            VALUES(%s,%s,'admin',0,'KB')
-            """,
-            (org_id, name),
-            True,
-        )
-
-    root = fetch_one(
-        """
-        SELECT node_id
-          FROM tree_nodes
-         WHERE tree_id=%s AND parent_id IS NULL AND name=%s
-         LIMIT 1
-        """,
-        (kb_tree_id, name),
-    )
-    if root and root.get("node_id"):
-        root_id = int(root["node_id"])
-    else:
-        root_id = execute(
-            """
-            INSERT INTO tree_nodes
-                (tree_id, parent_id, name, node_type, is_folder, sort_order, created_by, created_at, updated_at)
-            VALUES (%s, NULL, %s, 'KB_FOLDER', 1, 0, %s, NOW(), NOW())
-            """,
-            (kb_tree_id, name, user_id),
-            True,
-        )
-
-    _link_kb_root(node_id, root_id)
-    return kb_tree_id
-
-
-
-
-def _dup_name_exists(
-    tree_id: int,
-    parent_id: Optional[int],
-    name: str,
-    exclude_node_id: Optional[int] = None,
-) -> bool:
-    sql = """
-        SELECT node_id FROM tree_nodes
-         WHERE tree_id=%s
-           AND name=%s
-           AND parent_id <=> %s
-    """
-    params: List[Any] = [tree_id, name, parent_id]
-    if exclude_node_id is not None:
-        sql += " AND node_id<>%s"
-        params.append(exclude_node_id)
-    return fetch_one(sql, tuple(params)) is not None
-
-
-def _collect_descendants(tree_id: int, start_id: int) -> Set[int]:
-    descendants: Set[int] = set()
-    stack = [start_id]
-    while stack:
-        nid = stack.pop()
-        rows = fetch_all(
-            "SELECT node_id FROM tree_nodes WHERE tree_id=%s AND parent_id=%s",
-            (tree_id, nid),
-        )
-        for r in rows:
-            cid = r["node_id"]
-            if cid not in descendants:
-                descendants.add(cid)
-                stack.append(cid)
-    return descendants
-
-
-def _collect_doc_master_ids(node_ids: List[int]) -> Set[int]:
-    if not node_ids:
-        return set()
-    ph_nodes, args_nodes = _make_in_clause(sorted(node_ids))
-    if not ph_nodes:
-        return set()
-    rows = fetch_all(
-        f"""
-        SELECT DISTINCT pfn.doc_master_id
-          FROM pf_node_props pfn
-         WHERE pfn.node_id IN ({ph_nodes})
-           AND pfn.doc_master_id IS NOT NULL
-        """,
-        args_nodes,
-    )
-    return {int(r["doc_master_id"]) for r in (rows or [])}
-
-
-def _collect_orphan_doc_master_ids_for_kb_delete(kb_id: int, node_ids: List[int]) -> Set[int]:
-    if not node_ids:
-        return set()
-
-    to_delete: Set[int] = set()
-    for nid in node_ids:
-        n = _fetch_node(nid)
-        if n and n["tree_id"] == kb_id:
-            to_delete.add(nid)
-            to_delete |= _collect_descendants(kb_id, nid)
-    if not to_delete:
-        return set()
-
-    doc_ids = _collect_doc_master_ids(list(to_delete))
-    if not doc_ids:
-        return set()
-
-    ph_docs, args_docs = _make_in_clause(sorted(doc_ids))
-    ph_nodes, args_nodes = _make_in_clause(sorted(to_delete))
-
-    remain = fetch_all(
-        f"""
-        SELECT DISTINCT pfn.doc_master_id
-          FROM pf_node_props pfn
-         WHERE pfn.doc_master_id IN ({ph_docs})
-           AND pfn.node_id NOT IN ({ph_nodes})
-        """,
-        tuple(list(args_docs) + list(args_nodes)),
-    )
-    still_used = {int(r["doc_master_id"]) for r in (remain or [])}
-    return doc_ids - still_used
-
-def _collect_deletable_paths_for_kb_nodes(kb_id: int, node_ids: List[int]) -> Set[str]:
-    if not node_ids:
-        return set()
-
-    to_delete: Set[int] = set()
-    for nid in node_ids:
-        n = _fetch_node(nid)
-        if n and n["tree_id"] == kb_id:
-            to_delete.add(nid)
-            to_delete |= _collect_descendants(kb_id, nid)
-    if not to_delete:
-        return set()
-
-    ph_nodes, args_nodes = _make_in_clause(sorted(to_delete))
-    if not ph_nodes:
-        return set()
-
-    path_expr = _detect_storage_path_expr()
-
-    rows = fetch_all(
-        f"""
-        SELECT DISTINCT
-               so.object_id,
-               so.name AS object_name,
-               {path_expr} AS rel_path
-          FROM pf_node_props pfn
-          JOIN doc_revisions dr ON dr.doc_master_id = pfn.doc_master_id
-          JOIN storage_objects so ON so.object_id = dr.storage_object_id
-         WHERE pfn.node_id IN ({ph_nodes})
-           AND dr.deleted_at IS NULL
-        """,
-        args_nodes,
-    )
-    if not rows:
-        return set()
-
-    deletable: Set[str] = set()
-    for r in rows:
-        obj_id = r["object_id"]
-        rel_path = r.get("rel_path")
-        if not rel_path or rel_path == "__NO_PATH__":
-            rel_path = _object_basename(int(obj_id), r.get("object_name"))
-
-        cnt = fetch_one(
-            f"""
-            SELECT COUNT(*) AS cnt
-              FROM doc_revisions dr
-              JOIN pf_node_props pfn ON pfn.doc_master_id = dr.doc_master_id
-             WHERE dr.storage_object_id = %s
-               AND pfn.node_id NOT IN ({ph_nodes})
-            """,
-            tuple([obj_id]) + args_nodes,
-        )
-        remaining = int((cnt or {}).get("cnt", 0))
-        if remaining == 0 and rel_path:
-            deletable.add(rel_path)
-
-    return deletable
-
-def _collect_orphan_object_ids_for_kb_delete(kb_id: int, node_ids: List[int]) -> Set[int]:
-    if not node_ids:
-        return set()
-
-    to_delete: Set[int] = set()
-    for nid in node_ids:
-        n = _fetch_node(nid)
-        if n and n["tree_id"] == kb_id:
-            to_delete.add(nid)
-            to_delete |= _collect_descendants(kb_id, nid)
-    if not to_delete:
-        return set()
-
-    ph_nodes, args_nodes = _make_in_clause(sorted(to_delete))
-
-    rows = fetch_all(
-        f"""
-        SELECT DISTINCT dr.storage_object_id AS object_id
-          FROM pf_node_props pfn
-          JOIN doc_revisions dr ON dr.doc_master_id = pfn.doc_master_id
-         WHERE pfn.node_id IN ({ph_nodes})
-           AND dr.storage_object_id IS NOT NULL
-        """,
-        args_nodes,
-    )
-    objs = {int(r["object_id"]) for r in (rows or [])}
-    if not objs:
-        return set()
-
-    ph_objs, args_objs = _make_in_clause(sorted(objs))
-
-    kb_remain = fetch_all(
-        f"""
-        SELECT dr.storage_object_id AS object_id
-          FROM pf_node_props pfn
-          JOIN doc_revisions dr ON dr.doc_master_id = pfn.doc_master_id
-         WHERE dr.storage_object_id IN ({ph_objs})
-           AND pfn.node_id NOT IN ({ph_nodes})
-        GROUP BY dr.storage_object_id
-        """,
-        tuple(list(args_objs) + list(args_nodes)),
-    )
-    still_kb = {int(r["object_id"]) for r in (kb_remain or [])}
-
-    proj_remain = fetch_all(
-        f"""
-        SELECT pn.storage_object_id AS object_id
-          FROM project_nodes pn
-         WHERE pn.storage_object_id IN ({ph_objs})
-        GROUP BY pn.storage_object_id
-        """,
-        args_objs,
-    )
-    still_proj = {int(r["object_id"]) for r in (proj_remain or [])}
-
-    return objs - still_kb - still_proj
-
-
-def _collect_paths_for_object_ids(object_ids: Set[int]) -> Set[str]:
-    if not object_ids:
-        return set()
-    ph, args = _make_in_clause(sorted(object_ids))
-    rows = fetch_all(
-        f"""
-        SELECT object_id, name, file_right, relative_path
-          FROM storage_objects
-         WHERE object_id IN ({ph})
-        """,
-        args,
-    )
-    if not rows:
-        return set()
-    paths: Set[str] = set()
-    for r in rows:
-        obj_id = int(r["object_id"])
-        display = _build_display_name(r.get("name"), r.get("file_right"))
-        stored = display
-        rel = _normalize_rel_prefix(r.get("relative_path") or "")
-        if rel:
-            if rel.lower() == stored.lower() or rel.lower().endswith("/" + stored.lower()):
-                paths.add(rel)
-            else:
-                paths.add(f"{rel}/{stored}")
-        else:
-            paths.add(stored)
-    return paths
 
 class KBTiny(BaseModel):
     kb_id: int
@@ -807,189 +41,1001 @@ class KBTiny(BaseModel):
 
 
 class KBNodeIn(BaseModel):
-    name: str = Field(..., min_length=1, max_length=255)
+    name: str = Field(..., min_length=1)
     parent_id: Optional[int] = None
-    node_type: str = Field("KB_FOLDER", min_length=1, max_length=64)
+    node_type: Optional[str] = "KB_FOLDER"
 
 
 class KBNodePatch(BaseModel):
-    name: Optional[str] = Field(None, min_length=1, max_length=255)
+    name: Optional[str] = None
     parent_id: Optional[int] = None
-    node_type: Optional[str] = Field(None, min_length=1, max_length=64)
+    item_type_code: Optional[int] = None
+    sort_order: Optional[int] = None
+    policy_code: Optional[str] = None
+    target_group_id: Optional[int] = None
 
 
 class KBNodesBulkDeleteIn(BaseModel):
-    node_ids: List[int] = Field(..., min_items=1)
+    node_ids: List[int]
 
 
 class KBNodesReorderIn(BaseModel):
     parent_id: Optional[int] = None
-    orders: List[Tuple[int, int]] = Field(..., description="[(node_id, sort_order), ...]")
+    orders: List[Tuple[int, int]]
 
-def list_kb_trees(user_id: int = Depends(get_current_user_id)):
-    u = fetch_one("SELECT is_admin FROM users WHERE user_id=%s", (user_id,))
-    is_admin = bool(u and u["is_admin"])
 
-    if is_admin:
-        rows = fetch_all(
-            """
-            SELECT tree_id AS kb_id, name
-              FROM trees
-             WHERE kind='KB' AND kb_type='admin'
-             ORDER BY (name='SE KB') DESC, name
-            """
+class KBPermissionsBulkIn(BaseModel):
+    node_ids: List[int] = Field(..., min_length=1, max_length=5000)
+    policy_code: str = Field(..., min_length=1, max_length=32)
+    target_group_id: Optional[int] = Field(default=None, ge=1)
+
+
+class KbCreateIn(BaseModel):
+    name: str
+    kb_type: Optional[str] = "admin"
+    is_user_kb: int = 0
+    kind: Optional[str] = "KB"
+
+
+class PersonalKbCreateIn(BaseModel):
+    display_name: Optional[str] = None
+
+class PersonalAiJobActionIn(BaseModel):
+    job_id: int = Field(..., ge=1)
+    action: Literal["add", "update", "delete", "reindex"]
+
+class PersonalAiJobsIn(BaseModel):
+    jobs: List[PersonalAiJobActionIn] = Field(
+        default_factory=list,
+        max_length=5000,
+    )
+
+class PersonalDeletedActionIn(BaseModel):
+    deletion_id: int = Field(..., ge=1)
+    action: Literal["restore", "purge"]
+
+class PersonalDeletedActionsIn(BaseModel):
+    requests: List[PersonalDeletedActionIn] = Field(
+        default_factory=list,
+        max_length=5000,
+    )
+
+def _batch_response(items: List[Dict[str, Any]]) -> Dict[str, Any]:
+    succeeded = sum(1 for item in items if item.get("success") is True)
+    failed = len(items) - succeeded
+    return {
+        "ok": failed == 0,
+        "requested": len(items),
+        "succeeded": succeeded,
+        "failed": failed,
+        "items": items,
+    }
+
+def _http_exception_message(exc: HTTPException) -> str:
+    detail = exc.detail
+    if isinstance(detail, str):
+        return detail
+    return str(detail or "Request failed")
+
+def _require_admin(user_id: int) -> None:
+    if not is_admin(user_id):
+        raise HTTPException(status_code=403, detail="Admin permission required")
+
+
+def _safe_local_folder_name(value: str) -> str:
+    raw = clean_node_name(value)
+    for ch in '<>:"/\\|?*':
+        raw = raw.replace(ch, "_")
+    raw = raw.strip().strip(".")
+    return raw or "user"
+
+
+def _fetch_user(user_id: int) -> Dict[str, Any]:
+    user = fetch_one(
+        """
+        SELECT user_id, username, full_name, is_active
+          FROM users
+         WHERE user_id=%s
+        """,
+        (int(user_id),),
+    )
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    if not bool(user.get("is_active")):
+        raise HTTPException(status_code=403, detail="Inactive user")
+    return user
+
+
+def _personal_kb_row(user_id: int) -> Optional[Dict[str, Any]]:
+    return fetch_one(
+        """
+        SELECT node_id, parent_id, kb_root_id, kb_type, kb_owner_user_id,
+               name, alias, item_type_code, sort_order, created_at, updated_at
+          FROM tree_nodes
+         WHERE parent_id IS NULL
+           AND is_folder=TRUE
+           AND kb_type='personal'
+           AND kb_owner_user_id=%s
+         ORDER BY node_id
+         LIMIT 1
+        """,
+        (int(user_id),),
+    )
+
+
+def _personal_kb_payload(row: Optional[Dict[str, Any]], user: Dict[str, Any]) -> Dict[str, Any]:
+    usage = fetch_one(
+        """
+        SELECT committed_bytes, reserved_bytes
+          FROM personal_kb_storage_usage
+         WHERE user_id=%s
+        """,
+        (int(user["user_id"]),),
+    ) or {}
+    committed_bytes = max(int(usage.get("committed_bytes") or 0), 0)
+    reserved_bytes = max(int(usage.get("reserved_bytes") or 0), 0)
+    quota_bytes = max(int(settings.MINIO_PERSONAL_QUOTA_BYTES), 0)
+    accounted_bytes = committed_bytes + reserved_bytes
+    storage = {
+        "committed_bytes": committed_bytes,
+        "reserved_bytes": reserved_bytes,
+        "accounted_bytes": accounted_bytes,
+        "quota_bytes": quota_bytes,
+        "available_bytes": max(quota_bytes - accounted_bytes, 0),
+        "usage_percent": round((accounted_bytes / quota_bytes) * 100, 2) if quota_bytes else 0,
+    }
+    if not row:
+        folder_name = _safe_local_folder_name(str(user.get("username") or f"user_{user['user_id']}"))
+        return {
+            "exists": False,
+            "user_id": int(user["user_id"]),
+            "username": user.get("username"),
+            "folder_name": folder_name,
+            "kb": None,
+            "storage": storage,
+        }
+    folder_name = str(row.get("name") or user.get("username") or f"user_{user['user_id']}")
+    return {
+        "exists": True,
+        "user_id": int(user["user_id"]),
+        "username": user.get("username"),
+        "folder_name": folder_name,
+        "storage": storage,
+        "kb": {
+            "kb_id": int(row["node_id"]),
+            "id": int(row["node_id"]),
+            "name": row.get("alias") or row.get("name"),
+            "original_name": row.get("name"),
+            "kb_root_id": int(row["kb_root_id"]),
+            "kb_type": row.get("kb_type"),
+            "kb_owner_user_id": row.get("kb_owner_user_id"),
+            "item_type_code": row.get("item_type_code"),
+            "sort_order": row.get("sort_order") or 0,
+        },
+    }
+
+
+def _is_personal_kb_owner(root: Dict[str, Any], user_id: int) -> bool:
+    return root.get("kb_type") == "personal" and int(root.get("kb_owner_user_id") or 0) == int(user_id)
+
+
+def _require_kb_edit_access(root: Dict[str, Any], user_id: int) -> None:
+    kb_type = str(root.get("kb_type") or "").strip().lower()
+    if kb_type == "personal":
+        if not _is_personal_kb_owner(root, user_id):
+            raise HTTPException(status_code=403, detail="Personal KB edit permission required")
+        return
+    _require_admin(user_id)
+
+
+def _node_is_within_kb(node_id: int, kb_id: int) -> bool:
+    current = int(node_id)
+    target = int(kb_id)
+    visited: Set[int] = set()
+    while current not in visited:
+        if current == target:
+            return True
+        visited.add(current)
+        row = get_node(current)
+        parent_id = as_int((row or {}).get("parent_id"))
+        if parent_id is None:
+            return False
+        current = parent_id
+    return False
+
+
+def _require_node_edit_access(row: Dict[str, Any], user_id: int) -> None:
+    _require_kb_edit_access(row, user_id)
+
+
+def _require_personal_deletion_owner(deletion_id: int, user_id: int) -> Dict[str, Any]:
+    row = fetch_one(
+        """
+        SELECT
+            dd.deletion_id,
+            dd.object_id,
+            dd.node_id,
+            dd.ai_document_id,
+            dd.status,
+            tn.kb_type,
+            tn.kb_owner_user_id,
+            so.upload_mode,
+            so.uploader_user_id
+          FROM document_deletions dd
+          LEFT JOIN tree_nodes tn ON tn.node_id = dd.node_id
+          LEFT JOIN storage_objects so ON so.object_id = dd.object_id
+         WHERE dd.deletion_id=%s
+         LIMIT 1
+        """,
+        (int(deletion_id),),
+    )
+    if not row:
+        raise HTTPException(status_code=404, detail="Personal deleted document not found")
+    owned_by_tree = row.get("kb_type") == "personal" and int(row.get("kb_owner_user_id") or 0) == int(user_id)
+    owned_by_storage = row.get("upload_mode") == "personal" and int(row.get("uploader_user_id") or 0) == int(user_id)
+    if not (owned_by_tree or owned_by_storage):
+        raise HTTPException(status_code=403, detail="Personal KB deletion permission required")
+    return row
+
+
+def _node_type(row: Dict[str, Any]) -> str:
+    return "KB_FOLDER" if bool(row.get("is_folder")) else "file"
+
+
+def _row_to_tree_node(row: Dict[str, Any], children: List[Dict[str, Any]]) -> Dict[str, Any]:
+    is_folder = bool(row.get("is_folder"))
+    object_id = row.get("doc_id")
+    branch_type = str(row.get("branch_type") or "general").upper()
+    meta = {
+        "doc_id": object_id,
+        "object_id": object_id,
+        "storage_object_id": object_id,
+        "storage_object_name": row.get("doc_name"),
+        "storage_object_file_right": row.get("file_right"),
+        "storage_object_relative_path": row.get("relative_path"),
+        "storage_object_sub_path": row.get("sub_path"),
+        "mime_type": row.get("mime_type"),
+        "branch_type": branch_type,
+        "doc_status": row.get("doc_status"),
+        "item_type_code": row.get("item_type_code"),
+        "kb_root_id": row.get("kb_root_id"),
+        "kb_type": row.get("kb_type"),
+        "kb_owner_user_id": row.get("kb_owner_user_id"),
+        "upload_mode": row.get("upload_mode"),
+        "target_group_id": row.get("target_group_id"),
+    }
+    return {
+        "id": row["node_id"],
+        "node_id": row["node_id"],
+        "parent": row.get("parent_id"),
+        "parent_id": row.get("parent_id"),
+        "kb_root_id": row.get("kb_root_id"),
+        "kb_type": row.get("kb_type"),
+        "kb_owner_user_id": row.get("kb_owner_user_id"),
+        "name": row.get("alias") or row.get("name"),
+        "original_name": row.get("name"),
+        "kind": _node_type(row),
+        "node_type": _node_type(row),
+        "is_folder": is_folder,
+        "sort_order": row.get("sort_order") or 0,
+        "item_type_code": row.get("item_type_code"),
+        "policy_code": row.get("policy_code"),
+        "policy_matrix": node_policy_matrix(row),
+        "disabled": row.get("doc_status") in {"deleted_pending", "inactive_path_missing"},
+        "meta": meta,
+        "children": children,
+    }
+
+
+def _fetch_kb_rows(kb_root_id: int) -> List[Dict[str, Any]]:
+    return fetch_all(
+        """
+        SELECT
+            n.node_id, n.parent_id, n.kb_root_id, n.doc_id, n.name, n.alias,
+            n.kb_type, n.kb_owner_user_id, n.is_folder, n.sort_order, n.item_type_code,
+            n.created_by, n.created_at, n.updated_at,
+            so.doc_name, so.file_right, so.relative_path, so.sub_path, so.mime_type,
+            so.branch_type, so.upload_mode, so.uploader_user_id, so.doc_status,
+            ab.owner_user_id,
+            ab.policy_code,
+            ab.target_group_id,
+            pp.owner_r, pp.owner_w, pp.owner_x,
+            pp.group_r, pp.group_w, pp.group_x,
+            pp.other_r, pp.other_w, pp.other_x
+          FROM tree_nodes n
+          LEFT JOIN storage_objects so ON so.object_id = n.doc_id
+          LEFT JOIN acl_bindings ab ON ab.node_id = n.node_id
+          LEFT JOIN perm_policies pp ON pp.policy_code = ab.policy_code
+         WHERE n.kb_root_id=%s
+         ORDER BY COALESCE(n.parent_id,0), n.sort_order, n.alias, n.name, n.node_id
+        """,
+        (int(kb_root_id),),
+    )
+
+
+def _filter_kb_entries_by_document_visibility(
+    entries: List[Dict[str, Any]],
+    user_id: int,
+) -> List[Dict[str, Any]]:
+    if is_admin(user_id):
+        return entries
+
+    group_ids = active_group_ids_for_user(user_id)
+    rows_by_root: Dict[int, List[Dict[str, Any]]] = {}
+    states_by_root: Dict[int, Dict[int, Tuple[bool, bool, Set[int]]]] = {}
+    visible_entries: List[Dict[str, Any]] = []
+
+    for entry in entries:
+        root_id = int(entry["kb_root_id"])
+        if root_id not in rows_by_root:
+            rows_by_root[root_id] = _fetch_kb_rows(root_id)
+            source_rows = rows_by_root[root_id]
+            children_by_parent: Dict[int, List[Dict[str, Any]]] = {}
+            readable_document_ids: Set[int] = set()
+
+            for row in source_rows:
+                parent_id = as_int(row.get("parent_id"))
+                if parent_id is not None:
+                    children_by_parent.setdefault(parent_id, []).append(row)
+                if not bool(row.get("is_folder")) and row_has_document_permission(
+                    row,
+                    user_id,
+                    "r",
+                    user_group_ids=group_ids,
+                    admin_override=False,
+                ):
+                    readable_document_ids.add(int(row["node_id"]))
+
+            state_cache: Dict[int, Tuple[bool, bool, Set[int]]] = {}
+            visiting: Set[int] = set()
+
+            def subtree_state(node_id: int) -> Tuple[bool, bool, Set[int]]:
+                cached = state_cache.get(node_id)
+                if cached is not None:
+                    return cached
+                if node_id in visiting:
+                    return False, False, set()
+
+                visiting.add(node_id)
+                has_document = False
+                has_readable_document = False
+                readable_type_codes: Set[int] = set()
+
+                for child in children_by_parent.get(node_id, []):
+                    child_id = int(child["node_id"])
+                    if bool(child.get("is_folder")):
+                        child_has_document, child_has_readable, child_codes = subtree_state(child_id)
+                        has_document = has_document or child_has_document
+                        has_readable_document = has_readable_document or child_has_readable
+                        readable_type_codes.update(child_codes)
+                        continue
+
+                    has_document = True
+                    if child_id in readable_document_ids:
+                        has_readable_document = True
+                        item_type_code = child.get("item_type_code")
+                        if item_type_code is not None:
+                            readable_type_codes.add(int(item_type_code))
+
+                visiting.remove(node_id)
+                result = (has_document, has_readable_document, readable_type_codes)
+                state_cache[node_id] = result
+                return result
+
+            for candidate in entries:
+                if int(candidate["kb_root_id"]) == root_id:
+                    subtree_state(int(candidate["kb_id"]))
+            states_by_root[root_id] = state_cache
+
+        has_document, has_readable_document, readable_type_codes = states_by_root[root_id].get(
+            int(entry["kb_id"]),
+            (False, False, set()),
         )
-    else:
-        rows = fetch_all(
+        if has_document and not has_readable_document:
+            continue
+
+        entry["item_type_codes"] = sorted(readable_type_codes)
+        visible_entries.append(entry)
+
+    return visible_entries
+
+
+def _dup_alias_exists(parent_id: Optional[int], alias: str, exclude_node_id: Optional[int] = None) -> bool:
+    return bool(find_child_node_by_alias(parent_id, alias, exclude_node_id=exclude_node_id))
+
+
+def _refresh_storage_paths_for_nodes(node_ids: Set[int], *, enqueue_jobs: bool = True) -> None:
+    if not node_ids:
+        return
+    placeholders = ",".join(["%s"] * len(node_ids))
+    rows = fetch_all(
+        f"""
+        SELECT node_id, doc_id, parent_id
+          FROM tree_nodes
+         WHERE doc_id IS NOT NULL
+           AND node_id IN ({placeholders})
+        """,
+        tuple(node_ids),
+    )
+    for row in rows or []:
+        doc_id = as_int(row.get("doc_id"))
+        if doc_id is None:
+            continue
+        rel, sub = rel_sub_for_parent(as_int(row.get("parent_id")))
+        execute(
             """
-            SELECT tree_id AS kb_id, name
-              FROM trees
-             WHERE kind='KB'
-               AND kb_type='admin'
-               AND is_user_kb=0
-               AND org_id=(SELECT org_id FROM users WHERE user_id=%s)
-             ORDER BY (name='SE KB') DESC, name
+            UPDATE storage_objects
+               SET relative_path=%s,
+                   sub_path=%s,
+                   db_updated_at=NOW()
+             WHERE object_id=%s
             """,
-            (user_id,),
+            (rel, sub, doc_id),
         )
-    return rows
+        if enqueue_jobs:
+            ensure_ai_document_info(doc_id)
+            enqueue_ai_metadata_job(doc_id)
+
+
+def _queue_delete_for_doc(node_id: int, object_id: int, user_id: Optional[int]) -> None:
+    ai = fetch_one("SELECT ai_document_id FROM ai_document_info WHERE object_id=%s", (int(object_id),))
+    execute(
+        """
+        UPDATE storage_objects
+           SET doc_status='deleted_pending',
+               db_updated_at=NOW()
+         WHERE object_id=%s
+        """,
+        (int(object_id),),
+    )
+    execute(
+        """
+        INSERT INTO document_deletions(
+            object_id, node_id, ai_document_id, status, detected_at, remain_until,
+            detected_by_user_id, detected_source, reason, created_at, updated_at
+        )
+        VALUES(%s,%s,%s,'pending',NOW(),NOW() + INTERVAL '7 days',%s,'manual_confirm','manual delete',NOW(),NOW())
+        ON CONFLICT (object_id, active_deletion_marker) DO UPDATE SET
+            status='pending',
+            detected_at=NOW(),
+            remain_until=NOW() + INTERVAL '7 days',
+            detected_by_user_id=EXCLUDED.detected_by_user_id,
+            reason=EXCLUDED.reason,
+            updated_at=NOW()
+        """,
+        (int(object_id), int(node_id), (ai or {}).get("ai_document_id"), user_id),
+    )
+    ensure_ai_document_info(object_id, index_status="deleted")
+    enqueue_ai_job(object_id, "delete", user_id)
+
+
+def get_personal_kb(user_id: int = Depends(get_current_user_id)):
+    user = _fetch_user(user_id)
+    return _personal_kb_payload(_personal_kb_row(user_id), user)
+
+
+def create_personal_kb(
+    body: Optional[PersonalKbCreateIn] = Body(default=None),
+    user_id: int = Depends(get_current_user_id),
+):
+    user = _fetch_user(user_id)
+    existing = _personal_kb_row(user_id)
+    if existing:
+        return _personal_kb_payload(existing, user)
+
+    folder_name = _safe_local_folder_name(str(user.get("username") or f"user_{user_id}"))
+    display_name = clean_node_name((body.display_name if body else None) or folder_name) or folder_name
+    next_row = fetch_one(
+        """
+        SELECT nextval(pg_get_serial_sequence('tree_nodes', 'node_id')) AS next_id
+        """
+    )
+    next_node_id = int((next_row or {}).get("next_id") or 0)
+    if next_node_id <= 0:
+        raise HTTPException(status_code=500, detail="Cannot allocate personal KB id")
+
+    node_id = execute(
+        """
+        INSERT INTO tree_nodes(
+            node_id, parent_id, kb_root_id, kb_type, kb_owner_user_id, doc_id,
+            name, alias, is_folder, item_type_code, sort_order, created_by, created_at, updated_at
+        )
+        VALUES(%s,NULL,%s,'personal',%s,NULL,%s,%s,TRUE,%s,0,%s,NOW(),NOW())
+        """,
+        (
+            next_node_id,
+            next_node_id,
+            int(user_id),
+            folder_name,
+            display_name,
+            next_item_type_code(),
+            int(user_id),
+        ),
+        True,
+    )
+    if int(node_id or 0) != next_node_id:
+        execute("UPDATE tree_nodes SET kb_root_id=%s, updated_at=NOW() WHERE node_id=%s", (int(node_id), int(node_id)))
+
+    row = _personal_kb_row(user_id)
+    return _personal_kb_payload(row, user)
+
+
+def list_personal_deleted_documents(
+    status: str = Query("pending"),
+    user_id: int = Depends(get_current_user_id),
+):
+    safe_status = str(status or "pending").strip().lower()
+    if safe_status not in {"pending", "restored", "purged", "all"}:
+        safe_status = "pending"
+    params: List[Any] = [int(user_id), int(user_id)]
+    cond = ""
+    if safe_status != "all":
+        cond = "AND dd.status=%s"
+        params.append(safe_status)
+    rows = fetch_all(
+        f"""
+        SELECT
+            dd.deletion_id,
+            dd.object_id,
+            dd.node_id,
+            dd.ai_document_id,
+            dd.status,
+            dd.detected_at,
+            dd.remain_until,
+            dd.detected_by_user_id,
+            dd.detected_source,
+            dd.reason,
+            so.doc_name,
+            so.file_right,
+            so.relative_path,
+            so.sub_path,
+            so.branch_type,
+            so.doc_status,
+            tn.alias,
+            tn.item_type_code
+          FROM document_deletions dd
+          LEFT JOIN storage_objects so ON so.object_id = dd.object_id
+          LEFT JOIN tree_nodes tn ON tn.node_id = dd.node_id
+         WHERE (
+                (tn.kb_type='personal' AND tn.kb_owner_user_id=%s)
+             OR (so.upload_mode='personal' AND so.uploader_user_id=%s)
+         )
+           {cond}
+         ORDER BY dd.detected_at DESC, dd.deletion_id DESC
+        """,
+        tuple(params),
+    )
+    return {"items": rows or [], "total": len(rows or [])}
+
+
+def restore_personal_deleted_document(
+    deletion_id: int = Path(..., ge=1),
+    user_id: int = Depends(get_current_user_id),
+):
+    _require_personal_deletion_owner(deletion_id, user_id)
+    return admin_service.restore_deleted_document(deletion_id, actor_user_id=user_id)
+
+
+def purge_personal_deleted_document(
+    deletion_id: int = Path(..., ge=1),
+    user_id: int = Depends(get_current_user_id),
+):
+    _require_personal_deletion_owner(deletion_id, user_id)
+    return admin_service.purge_deleted_document(deletion_id, actor_user_id=user_id)
+
+def apply_personal_deleted_document_actions(
+    payload: PersonalDeletedActionsIn,
+    user_id: int = Depends(get_current_user_id),
+):
+    results: List[Dict[str, Any]] = []
+
+    for request in payload.requests:
+        deletion_id = int(request.deletion_id)
+        action = request.action
+
+        try:
+            if action == "restore":
+                result = restore_personal_deleted_document(
+                    deletion_id=deletion_id,
+                    user_id=user_id,
+                )
+            else:
+                result = purge_personal_deleted_document(
+                    deletion_id=deletion_id,
+                    user_id=user_id,
+                )
+
+            results.append({
+                "deletion_id": deletion_id,
+                "action": action,
+                "success": True,
+                "object_id": result.get("object_id"),
+                "restored": result.get("restored"),
+                "purged": result.get("purged"),
+                "status": result.get("status"),
+                "job_id": result.get("job_id") or result.get("delete_job_id"),
+                "error": None,
+            })
+        except HTTPException as exc:
+            results.append({
+                "deletion_id": deletion_id,
+                "action": action,
+                "success": False,
+                "status_code": exc.status_code,
+                "error": _http_exception_message(exc),
+            })
+        except Exception as exc:
+            results.append({
+                "deletion_id": deletion_id,
+                "action": action,
+                "success": False,
+                "status_code": 500,
+                "error": str(exc) or "Unexpected server error",
+            })
+
+    return _batch_response(results)
+
+def _personal_ai_owner_sql() -> str:
+    return """
+        (
+            (
+                ai.user_id=%s
+                AND (
+                    COALESCE(tn.kb_type, '') IN ('personal', 'person')
+                 OR COALESCE(so.upload_mode, '') = 'personal'
+                 OR COALESCE(dd_tn.kb_type, '') IN ('personal', 'person')
+                )
+            )
+         OR (tn.kb_type='personal' AND tn.kb_owner_user_id=%s)
+         OR (so.upload_mode='personal' AND so.uploader_user_id=%s)
+         OR (dd_tn.kb_type='personal' AND dd_tn.kb_owner_user_id=%s)
+        )
+    """
+
+
+def list_personal_ai_index_jobs(
+    status: str = Query("failed"),
+    limit: int = Query(200, ge=1, le=5000),
+    user_id: int = Depends(get_current_user_id),
+):
+    safe_status = str(status or "failed").strip().lower()
+    params: List[Any] = [int(user_id), int(user_id), int(user_id), int(user_id)]
+    cond = ""
+    if safe_status != "all":
+        cond = "AND j.status=%s"
+        params.append(safe_status)
+    params.append(max(1, min(int(limit or 200), 5000)))
+    rows = fetch_all(
+        f"""
+        SELECT DISTINCT
+            j.job_id,
+            j.ai_document_id,
+            j.object_id,
+            j.action,
+            j.status,
+            j.retry_count,
+            j.scheduled_at,
+            j.started_at,
+            j.finished_at,
+            j.last_error,
+            j.created_at,
+            j.updated_at,
+            ai.doc_name,
+            ai.relative_path,
+            ai.sub_path,
+            ai.file_right,
+            ai.user_id,
+            ai.index_status
+          FROM ai_index_jobs j
+          JOIN ai_document_info ai ON ai.ai_document_id = j.ai_document_id
+          LEFT JOIN storage_objects so ON so.object_id = COALESCE(j.object_id, ai.object_id)
+          LEFT JOIN tree_nodes tn ON tn.doc_id = COALESCE(j.object_id, ai.object_id)
+          LEFT JOIN document_deletions dd ON dd.ai_document_id = j.ai_document_id
+          LEFT JOIN tree_nodes dd_tn ON dd_tn.node_id = dd.node_id
+         WHERE {_personal_ai_owner_sql()}
+           {cond}
+         ORDER BY j.updated_at DESC, j.job_id DESC
+         LIMIT %s
+        """,
+        tuple(params),
+    )
+    return {"items": rows or [], "total": len(rows or [])}
+
+
+def retry_personal_ai_index_jobs(
+    payload: PersonalAiJobsIn,
+    user_id: int = Depends(get_current_user_id),
+):
+    from app.services.features.pipeline_job_service import retry_jobs
+
+    return retry_jobs(
+        [item.job_id for item in payload.jobs],
+        actor_user_id=int(user_id),
+        is_admin=False,
+    )
+
+
+def dispatch_personal_ai_index_jobs(
+    payload: PersonalAiJobsIn,
+    user_id: int = Depends(get_current_user_id),
+):
+    raise HTTPException(
+        status_code=410,
+        detail="Direct dispatch was removed; use the standalone Pipeline Dispatcher",
+    )
+
+
+def list_kb_trees(
+    kb_type: Optional[str] = Query(None),
+    user_id: int = Depends(get_current_user_id),
+):
+    requested_type = str(kb_type or "").strip().lower()
+    params: List[Any] = []
+    visibility_sql = "AND (n.kb_type <> 'personal' OR n.kb_owner_user_id=%s)"
+    params.append(int(user_id))
+    if requested_type == "admin":
+        visibility_sql = "AND n.kb_type <> 'personal'"
+        params = []
+    elif requested_type == "personal":
+        visibility_sql = "AND n.kb_type='personal' AND n.kb_owner_user_id=%s"
+        params = [int(user_id)]
+    rows = fetch_all(
+        f"""
+        SELECT
+            n.node_id AS kb_id,
+            n.node_id AS id,
+            n.alias AS name,
+            n.name AS original_name,
+            n.parent_id,
+            n.kb_root_id,
+            n.kb_type,
+            n.kb_owner_user_id,
+            n.item_type_code,
+            (
+                SELECT STRING_AGG(DISTINCT doc.item_type_code::text, ',' ORDER BY doc.item_type_code::text)
+                  FROM tree_nodes doc
+                  JOIN storage_objects doc_so ON doc_so.object_id = doc.doc_id
+                 WHERE doc.kb_root_id = n.kb_root_id
+                   AND doc.is_folder = FALSE
+                   AND doc.doc_id IS NOT NULL
+                   AND doc.item_type_code IS NOT NULL
+                   AND doc_so.doc_status = 'active'
+                   AND (n.parent_id IS NULL OR doc.item_type_code = n.item_type_code)
+            ) AS document_item_type_codes,
+            n.sort_order,
+            n.created_at
+          FROM tree_nodes n
+         WHERE n.is_folder=TRUE
+           AND (n.parent_id IS NULL OR n.parent_id = n.kb_root_id)
+           {visibility_sql}
+         ORDER BY
+            CASE WHEN n.parent_id IS NULL THEN 0 ELSE 1 END,
+            n.item_type_code,
+            n.sort_order,
+            n.alias,
+            n.node_id
+        """,
+        tuple(params),
+    )
+    for row in rows or []:
+        raw_codes = str(row.pop("document_item_type_codes", "") or "")
+        row["item_type_codes"] = [int(code) for code in raw_codes.split(",") if code.strip()]
+    return _filter_kb_entries_by_document_visibility(rows or [], user_id)
+
+
+def list_perm_policies(user_id: int = Depends(get_current_user_id)):
+    _require_admin(user_id)
+    rows = fetch_all(
+        """
+        SELECT
+            policy_code,
+            owner_r, owner_w, owner_x,
+            group_r, group_w, group_x,
+            other_r, other_w, other_x
+          FROM perm_policies
+         ORDER BY policy_code
+        """
+    )
+    out = []
+    for row in rows or []:
+        out.append(
+            {
+                "policy_code": row.get("policy_code"),
+                "matrix": node_policy_matrix(row),
+                "owner": {
+                    "r": bool(row.get("owner_r")),
+                    "w": bool(row.get("owner_w")),
+                    "x": bool(row.get("owner_x")),
+                },
+                "group": {
+                    "r": bool(row.get("group_r")),
+                    "w": bool(row.get("group_w")),
+                    "x": bool(row.get("group_x")),
+                },
+                "other": {
+                    "r": bool(row.get("other_r")),
+                    "w": bool(row.get("other_w")),
+                    "x": bool(row.get("other_x")),
+                },
+            }
+        )
+    return {"items": out}
 
 
 def get_kb_tree(
     kb_id: int = Path(..., ge=1),
+    include_empty_folders: bool = Query(False),
+    admin_view: bool = Query(False),
     user_id: int = Depends(get_current_user_id),
 ):
-    t = fetch_one(
-        "SELECT is_user_kb, owner_user_id, org_id, name FROM trees WHERE tree_id=%s AND kb_type = 'admin'",
-        (kb_id,),
-    )
-    if not t:
-        raise HTTPException(status_code=404, detail="KB ?몃━ ?놁쓬")
-
-    is_user_kb = bool(t.get("is_user_kb", 0))
-    owner_user_id = t.get("owner_user_id")
-
-    u = fetch_one("SELECT org_id, is_admin FROM users WHERE user_id=%s", (user_id,))
-    if not u:
-        raise HTTPException(status_code=401, detail="?몄쬆 ?ъ슜???놁쓬")
-
-    is_admin = bool(u.get("is_admin", 0))
-
-    if is_user_kb:
-        if not (user_id == owner_user_id or is_admin):
-            raise HTTPException(status_code=403, detail="媛쒖씤??KB ?묎렐 遺덇?")
-    else:
-        _ = _ensure_kb_tree(kb_id, user_id)
-
-    if (not is_user_kb) or is_admin or (is_user_kb and user_id == owner_user_id):
-        rows = fetch_all(
-            """
-            SELECT 
-                n.node_id,
-                n.parent_id,
-                n.name,
-                n.node_type,
-                n.is_folder,
-                n.sort_order,
-                pfn.doc_master_id          AS doc_master_id,
-                dr.storage_object_id       AS storage_object_id,
-                so.name                    AS storage_object_name,
-                so.file_right              AS storage_object_file_right,
-                so.relative_path           AS storage_object_relative_path,
-                so.sub_path                AS storage_object_sub_path
-              FROM tree_nodes n
-              LEFT JOIN pf_node_props pfn ON pfn.node_id = n.node_id
-              LEFT JOIN doc_revisions dr
-                ON dr.revision_id = (
-                  SELECT r.revision_id
-                    FROM doc_revisions r
-                   WHERE r.doc_master_id=pfn.doc_master_id AND r.deleted_at IS NULL
-                   ORDER BY r.rev_no DESC
-                   LIMIT 1
-                )
-              LEFT JOIN storage_objects so ON so.object_id = dr.storage_object_id
-             WHERE n.tree_id=%s
-               AND (n.is_folder = 1 OR pfn.doc_master_id IS NOT NULL)
-             ORDER BY COALESCE(n.parent_id,0), n.sort_order, n.name
-            """,
-            (kb_id,),
-        )
-    else:
-        rows = fetch_all(
-            """
-            SELECT 
-                n.node_id,
-                n.parent_id,
-                n.name,
-                n.node_type,
-                n.is_folder,
-                n.sort_order,
-                pfn.doc_master_id          AS doc_master_id,
-                dr.storage_object_id       AS storage_object_id,
-                so.name                    AS storage_object_name,
-                so.file_right              AS storage_object_file_right,
-                so.relative_path           AS storage_object_relative_path,
-                so.sub_path                AS storage_object_sub_path
-              FROM tree_nodes n
-              LEFT JOIN pf_node_props pfn ON pfn.node_id = n.node_id
-              LEFT JOIN doc_revisions dr
-                ON dr.revision_id = (
-                  SELECT r.revision_id
-                    FROM doc_revisions r
-                   WHERE r.doc_master_id=pfn.doc_master_id AND r.deleted_at IS NULL
-                   ORDER BY r.rev_no DESC
-                   LIMIT 1
-                )
-              LEFT JOIN storage_objects so ON so.object_id = dr.storage_object_id
-             WHERE n.tree_id=%s
-               AND fn_acl_can('TREE_NODE', n.node_id, %s, 'r') = 1
-               AND (n.is_folder = 1 OR pfn.doc_master_id IS NOT NULL)
-             ORDER BY COALESCE(n.parent_id,0), n.sort_order, n.name
-            """,
-            (kb_id, user_id),
-        )
+    root = get_kb_entry(kb_id)
+    if root.get("kb_type") == "personal" and not _is_personal_kb_owner(root, user_id):
+        raise HTTPException(status_code=403, detail="Personal KB permission required")
+    rows = _fetch_kb_rows(int(root["kb_root_id"]))
+    user_is_admin = is_admin(user_id)
+    if admin_view and not user_is_admin:
+        raise HTTPException(status_code=403, detail="Admin permission required")
+    use_admin_view = bool(admin_view and user_is_admin)
+    group_ids = active_group_ids_for_user(user_id) if not use_admin_view else set()
+    visible_document_ids: Set[int] = set()
+    for row in rows or []:
+        if not bool(row.get("is_folder")) and row_has_document_permission(
+            row,
+            user_id,
+            "r",
+            user_group_ids=group_ids,
+            admin_override=use_admin_view,
+        ):
+            visible_document_ids.add(int(row["node_id"]))
 
     by_parent: Dict[Optional[int], List[Dict[str, Any]]] = {}
-    for r in rows:
-        by_parent.setdefault(r.get("parent_id"), []).append(r)
+    for row in rows or []:
+        by_parent.setdefault(as_int(row.get("parent_id")), []).append(row)
 
-    def to_tree(pid: Optional[int], in_kiwix: bool = False) -> List[Dict[str, Any]]:
+    def build(parent_id: Optional[int]) -> Tuple[List[Dict[str, Any]], bool, bool]:
         out: List[Dict[str, Any]] = []
-        siblings = by_parent.get(pid, [])
-        if in_kiwix:
-            siblings = sorted(siblings, key=_kiwix_sort_key)
-        else:
-            siblings = sorted(siblings, key=_default_tree_sort_key)
-        for r in siblings:
-            child_in_kiwix = in_kiwix or _is_kiwix_root_name(r.get("name"))
-            children = to_tree(r["node_id"], child_in_kiwix)
-            out.append(
-                {
-                    "id": r["node_id"],
-                    "parent": r["parent_id"],
-                    "name": r["name"],
-                    "kind": r["node_type"],
-                    "node_type": r["node_type"],
-                    "is_folder": bool(r.get("is_folder")),
-                    "sort_order": r.get("sort_order") or 0,
-                    "meta": {
-                        "doc_id": r.get("doc_master_id"),
-                        "storage_object_id": r.get("storage_object_id"),
-                        "storage_object_name": r.get("storage_object_name"),
-                        "storage_object_file_right": r.get("storage_object_file_right"),
-                        "storage_object_relative_path": r.get("storage_object_relative_path"),
-                        "storage_object_sub_path": r.get("storage_object_sub_path"),
-                    },
-                    "children": children,
-                }
-            )
-        return out
+        has_document = False
+        has_visible_document = False
+        siblings = sorted(
+            by_parent.get(parent_id, []),
+            key=lambda r: (int(r.get("sort_order") or 0), str(r.get("alias") or r.get("name") or "").lower(), int(r["node_id"])),
+        )
+        for row in siblings:
+            if not bool(row.get("is_folder")):
+                has_document = True
+                if int(row["node_id"]) in visible_document_ids:
+                    has_visible_document = True
+                    out.append(_row_to_tree_node(row, []))
+                continue
+
+            children, child_has_document, child_has_visible_document = build(int(row["node_id"]))
+            has_document = has_document or child_has_document
+            has_visible_document = has_visible_document or child_has_visible_document
+
+            # A genuinely empty folder remains visible. A folder whose subtree
+            # contains documents but none readable by this user is hidden.
+            if include_empty_folders or child_has_visible_document or not child_has_document:
+                out.append(_row_to_tree_node(row, children))
+        return out, has_document, has_visible_document
+
+    nodes, _, _ = build(int(root["node_id"]))
 
     return {
-        "kb_id": kb_id,
-        "kb_name": t["name"],
-        "is_user_kb": is_user_kb,
-        "nodes": to_tree(None),
+        "kb_id": int(root["node_id"]),
+        "kb_name": root.get("alias") or root.get("name"),
+        "is_user_kb": root.get("kb_type") == "personal",
+        "item_type_code": root.get("item_type_code"),
+        "nodes": nodes,
+    }
+
+
+def update_kb_permissions_bulk(
+    kb_id: int,
+    body: KBPermissionsBulkIn,
+    user_id: int = Depends(get_current_user_id),
+):
+    root = get_kb_entry(kb_id)
+    _require_admin(user_id)
+    if str(root.get("kb_type") or "").strip().lower() == "personal":
+        raise HTTPException(status_code=400, detail="Personal KB documents always use PRIVATE policy")
+
+    node_ids = list(dict.fromkeys(int(node_id) for node_id in body.node_ids if int(node_id) > 0))
+    if not node_ids:
+        raise HTTPException(status_code=400, detail="No document nodes were selected")
+
+    policy_code = str(body.policy_code or "").strip().upper()
+    policy = fetch_one(
+        """
+        SELECT policy_code, group_r, group_w, group_x, other_r, other_w, other_x
+          FROM perm_policies
+         WHERE policy_code=%s
+        """,
+        (policy_code,),
+    )
+    if not policy:
+        raise HTTPException(status_code=400, detail="Unknown policy_code")
+
+    group_required = policy_requires_target_group(policy)
+    target_group_id = int(body.target_group_id) if body.target_group_id is not None else None
+    if group_required:
+        if target_group_id is None:
+            raise HTTPException(status_code=400, detail="target_group_id is required for GROUP policy")
+        group = fetch_one(
+            "SELECT group_id FROM org_groups WHERE group_id=%s AND is_active=TRUE",
+            (target_group_id,),
+        )
+        if not group:
+            raise HTTPException(status_code=400, detail="Unknown active target_group_id")
+    else:
+        target_group_id = None
+
+    with db_transaction() as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                WITH RECURSIVE subtree AS (
+                    SELECT node_id
+                      FROM tree_nodes
+                     WHERE node_id=%s
+                    UNION ALL
+                    SELECT child.node_id
+                      FROM tree_nodes child
+                      JOIN subtree parent ON child.parent_id=parent.node_id
+                )
+                SELECT n.node_id, n.doc_id, n.created_by, ab.owner_user_id
+                  FROM tree_nodes n
+                  JOIN subtree s ON s.node_id=n.node_id
+                  LEFT JOIN acl_bindings ab ON ab.node_id=n.node_id
+                 WHERE n.node_id=ANY(%s)
+                   AND n.is_folder=FALSE
+                   AND n.doc_id IS NOT NULL
+                   AND n.kb_type <> 'personal'
+                 FOR UPDATE OF n
+                """,
+                (int(kb_id), node_ids),
+            )
+            rows = cursor.fetchall() or []
+            for row in rows:
+                owner_user_id = (
+                    as_int(row.get("owner_user_id"))
+                    or as_int(row.get("created_by"))
+                    or int(user_id)
+                )
+                cursor.execute(
+                    """
+                    INSERT INTO acl_bindings(
+                        node_id, policy_code, owner_user_id, target_group_id,
+                        created_at, updated_at
+                    )
+                    VALUES(%s,%s,%s,%s,NOW(),NOW())
+                    ON CONFLICT (node_id) DO UPDATE SET
+                        policy_code=EXCLUDED.policy_code,
+                        owner_user_id=EXCLUDED.owner_user_id,
+                        target_group_id=EXCLUDED.target_group_id,
+                        updated_at=NOW()
+                    """,
+                    (
+                        int(row["node_id"]),
+                        policy_code,
+                        owner_user_id,
+                        target_group_id,
+                    ),
+                )
+
+    for row in rows:
+        object_id = as_int(row.get("doc_id"))
+        if object_id is not None:
+            ensure_ai_document_info(object_id)
+            enqueue_ai_metadata_job(object_id, user_id)
+
+    updated = len(rows)
+    return {
+        "requested": len(node_ids),
+        "matched": updated,
+        "updated": updated,
+        "skipped": len(node_ids) - updated,
+        "policy_code": policy_code,
+        "target_group_id": target_group_id,
     }
 
 
@@ -998,60 +1044,49 @@ def create_kb_node(
     data: KBNodeIn,
     user_id: int = Depends(get_current_user_id),
 ):
-    info = _ensure_kb_tree(kb_id, user_id)
+    root = get_kb_entry(kb_id)
+    _require_kb_edit_access(root, user_id)
+    name = clean_node_name(data.name)
+    if not name:
+        raise HTTPException(status_code=400, detail="name is required")
 
-    if data.parent_id is not None:
-        parent = _fetch_node(data.parent_id)
-        if not parent or parent["tree_id"] != kb_id:
-            raise HTTPException(status_code=404, detail="遺紐??몃뱶 ?놁쓬")
-        if not _is_folder(kb_id, parent["node_id"]):
-            raise HTTPException(status_code=400, detail="遺紐⑤뒗 ?대뜑?ъ빞 ?⑸땲??")
-        if not info["is_admin"] and not _has_perm(user_id, parent["node_id"], "w"):
-            raise HTTPException(status_code=403, detail="?곌린 沅뚰븳 ?놁쓬")
-    else:
-        if not info["is_admin"]:
-            raise HTTPException(status_code=403, detail="猷⑦듃 ?섏쐞 異붽???愿由ъ옄留??덉슜")
+    parent_id = data.parent_id if data.parent_id is not None else kb_id
+    parent = get_node(parent_id)
+    if not parent or not bool(parent.get("is_folder")):
+        raise HTTPException(status_code=404, detail="Parent folder not found")
+    if not _node_is_within_kb(int(parent_id), int(root["node_id"])):
+        raise HTTPException(status_code=403, detail="Parent folder must belong to the selected KB")
+    _require_node_edit_access(parent, user_id)
 
-    if _dup_name_exists(kb_id, data.parent_id, data.name):
-        raise HTTPException(status_code=409, detail="?숈씪???대쫫???대? 議댁옱?⑸땲??")
+    if _dup_alias_exists(parent_id, name):
+        raise HTTPException(status_code=409, detail="A node with the same name already exists")
 
-    node_type = (data.node_type or "KB_FOLDER").upper()
-    is_folder_val = _is_folder_by_type(node_type)
-
+    is_top_category = parent.get("parent_id") is None
+    item_type_code = next_item_type_code() if is_top_category else int(parent.get("item_type_code") or 10)
     node_id = execute(
         """
-        INSERT INTO tree_nodes
-            (tree_id, parent_id, name, node_type, is_folder, sort_order, created_by, created_at, updated_at)
-        VALUES (%s, %s, %s, %s, %s, 0, %s, NOW(), NOW())
+        INSERT INTO tree_nodes(
+            parent_id, kb_root_id, kb_type, kb_owner_user_id, doc_id,
+            name, alias, is_folder, item_type_code, sort_order, created_by, created_at, updated_at
+        )
+        VALUES(%s,%s,%s,%s,NULL,%s,%s,TRUE,%s,%s,%s,NOW(),NOW())
         """,
-        (kb_id, data.parent_id, data.name, node_type, is_folder_val, user_id),
+        (
+            parent_id,
+            parent["kb_root_id"],
+            parent.get("kb_type") or "admin",
+            parent.get("kb_owner_user_id"),
+            name,
+            name,
+            item_type_code,
+            next_sort_order(parent_id),
+            user_id,
+        ),
         True,
     )
-    _ensure_kb_from_folder(
-        kb_id=kb_id,
-        node_id=node_id,
-        parent_id=data.parent_id,
-        name=data.name,
-        user_id=user_id,
-    )
-    _maybe_create_mirror_node(
-        node_id=node_id,
-        parent_id=data.parent_id,
-        name=data.name,
-        node_type=node_type,
-        is_folder=is_folder_val,
-        user_id=user_id,
-    )
-
-    resp = {"node_id": node_id, "message": "?앹꽦"}
-    if kb_id == SE_KB_ID and is_folder_val and not _is_kiwix_root_path(node_id):
-        local_dir = _build_local_folder_path(node_id)
-        try:
-            os.makedirs(local_dir, exist_ok=True)
-        except Exception as e:
-            log.warning("[kb] failed to create local folder %s: %s", local_dir, e)
-            resp["fs_warning"] = f"Failed to create local folder: {local_dir}"
-    return resp
+    policy_code = "PRIVATE" if str(parent.get("kb_type") or "").lower() == "personal" else "PUBLIC"
+    ensure_acl(node_id, policy_code, owner_user_id=user_id)
+    return {"node_id": node_id, "id": node_id, "message": "Created"}
 
 
 def patch_kb_node(
@@ -1059,197 +1094,186 @@ def patch_kb_node(
     data: KBNodePatch,
     user_id: int = Depends(get_current_user_id),
 ):
-    row = _fetch_node(node_id)
+    row = get_node(node_id)
     if not row:
-        raise HTTPException(status_code=404, detail="?몃뱶 ?놁쓬")
+        raise HTTPException(status_code=404, detail="Node not found")
+    _require_node_edit_access(row, user_id)
 
-    info = _ensure_kb_tree(row["tree_id"], user_id)
-    if not info["is_admin"] and not _has_perm(user_id, node_id, "w"):
-        raise HTTPException(status_code=403, detail="?곌린 沅뚰븳 ?놁쓬")
-
-    tree_id = row["tree_id"]
-    old_parent = row["parent_id"]
-    old_name = row["name"]
-
-    provided_parent = "parent_id" in data.model_fields_set
-    provided_node_type = "node_type" in data.model_fields_set
-
-    new_parent = old_parent if not provided_parent else data.parent_id
-    new_name = old_name if data.name is None else data.name
-
+    fields_set = getattr(data, "model_fields_set", set())
     sets: List[str] = []
     params: List[Any] = []
+    new_parent = as_int(row.get("parent_id"))
+    item_type_code = as_int(row.get("item_type_code"), 10) or 10
+    acl_changed = False
 
-    if provided_parent:
-        if new_parent == node_id:
-            raise HTTPException(status_code=400, detail="遺紐⑤? ?먭린 ?먯떊?쇰줈 ?ㅼ젙?????놁뒿?덈떎.")
-        if new_parent is not None:
-            parent = _fetch_node(new_parent)
-            if not parent or parent["tree_id"] != tree_id:
-                raise HTTPException(status_code=404, detail="遺紐??몃뱶 ?놁쓬")
-            if not _is_folder(tree_id, new_parent):
-                raise HTTPException(status_code=400, detail="遺紐⑤뒗 ?대뜑?ъ빞 ?⑸땲??")
-            descendants = _collect_descendants(tree_id, node_id)
-            if new_parent in descendants:
-                raise HTTPException(status_code=400, detail="遺紐⑤? ?먯넀?쇰줈 ?ㅼ젙?????놁뒿?덈떎.")
-            if not info["is_admin"] and not _has_perm(user_id, new_parent, "w"):
-                raise HTTPException(status_code=403, detail="??遺紐⑥뿉 ????곌린 沅뚰븳 ?놁쓬")
-        sets.append("parent_id=%s")
-        params.append(new_parent)
+    if "name" in fields_set and data.name is not None:
+        alias = clean_node_name(data.name)
+        if not alias:
+            raise HTTPException(status_code=400, detail="name cannot be empty")
+        if _dup_alias_exists(new_parent, alias, exclude_node_id=node_id):
+            raise HTTPException(status_code=409, detail="A node with the same name already exists")
+        if bool(row.get("is_folder")) and str(row.get("kb_type") or "").lower() == "personal":
+            sets.extend(["name=%s", "alias=%s"])
+            params.extend([alias, alias])
+        else:
+            sets.append("alias=%s")
+            params.append(alias)
 
-    if data.name is not None or provided_parent:
-        if _dup_name_exists(tree_id, new_parent, new_name, exclude_node_id=node_id):
-            raise HTTPException(status_code=409, detail="?숈씪???대쫫???대? 議댁옱?⑸땲??")
+    if "parent_id" in fields_set:
+        target_parent = data.parent_id
+        if target_parent == node_id:
+            raise HTTPException(status_code=400, detail="A node cannot be its own parent")
+        if target_parent is None:
+            raise HTTPException(status_code=400, detail="Root move is not supported")
+        parent = get_node(target_parent)
+        if not parent or not bool(parent.get("is_folder")):
+            raise HTTPException(status_code=404, detail="Parent folder not found")
+        _require_node_edit_access(parent, user_id)
+        if (
+            as_int(parent.get("kb_root_id")) != as_int(row.get("kb_root_id"))
+            or str(parent.get("kb_type") or "").lower() != str(row.get("kb_type") or "").lower()
+            or as_int(parent.get("kb_owner_user_id")) != as_int(row.get("kb_owner_user_id"))
+        ):
+            raise HTTPException(status_code=403, detail="A node can only be moved within the same KB")
+        descendants = collect_descendants([node_id])
+        if int(target_parent) in descendants:
+            raise HTTPException(status_code=400, detail="Cannot move a node into its own descendant")
+        alias_for_dup = str(row.get("alias") or row.get("name") or "")
+        if _dup_alias_exists(target_parent, alias_for_dup, exclude_node_id=node_id):
+            raise HTTPException(status_code=409, detail="A node with the same name already exists")
+        new_parent = int(target_parent)
+        item_type_code = int(parent.get("item_type_code") or 10)
+        sets.extend(["parent_id=%s", "kb_root_id=%s", "item_type_code=%s"])
+        params.extend([new_parent, parent["kb_root_id"], item_type_code])
 
-    if data.name is not None:
-        sets.append("name=%s")
-        params.append(new_name)
+    if "item_type_code" in fields_set and data.item_type_code is not None:
+        _require_admin(user_id)
+        if not bool(row.get("is_folder")):
+            raise HTTPException(status_code=400, detail="item_type_code can only be changed on top-level category folders")
+        if "parent_id" in fields_set:
+            raise HTTPException(status_code=400, detail="Move and item_type_code change must be handled separately")
+        row_node_id = as_int(row.get("node_id"))
+        row_parent_id = as_int(row.get("parent_id"))
+        row_kb_root_id = as_int(row.get("kb_root_id"))
+        if (
+            row_node_id is None
+            or row_parent_id is None
+            or row_kb_root_id is None
+            or row_node_id == row_kb_root_id
+            or row_parent_id != row_kb_root_id
+        ):
+            raise HTTPException(status_code=400, detail="item_type_code can only be changed on top-level category folders")
+        item_type_code = int(data.item_type_code)
+        duplicate_code = fetch_one(
+            """
+            SELECT node_id
+              FROM tree_nodes
+             WHERE kb_root_id=%s
+               AND parent_id=kb_root_id
+               AND node_id<>%s
+               AND item_type_code=%s
+             LIMIT 1
+            """,
+            (row_kb_root_id, row_node_id, item_type_code),
+        )
+        if duplicate_code:
+            raise HTTPException(status_code=409, detail="item_type_code already exists in this KB top-level category")
+        sets.append("item_type_code=%s")
+        params.append(item_type_code)
 
-    if provided_node_type and data.node_type is not None:
-        new_node_type = (data.node_type or "").upper()
-        sets.append("node_type=%s")
-        params.append(new_node_type)
-        sets.append("is_folder=%s")
-        params.append(_is_folder_by_type(new_node_type))
+    if "sort_order" in fields_set and data.sort_order is not None:
+        sets.append("sort_order=%s")
+        params.append(int(data.sort_order))
+
+    if "policy_code" in fields_set and data.policy_code is not None:
+        _require_admin(user_id)
+        if bool(row.get("is_folder")):
+            raise HTTPException(status_code=400, detail="Folder ACL is not supported")
+        if str(row.get("kb_type") or "").strip().lower() == "personal":
+            raise HTTPException(status_code=400, detail="Personal KB documents always use PRIVATE policy")
+        policy_code = str(data.policy_code or "").strip().upper()
+        policy = fetch_one(
+            """
+            SELECT policy_code, group_r, group_w, group_x, other_r, other_w, other_x
+              FROM perm_policies
+             WHERE policy_code=%s
+            """,
+            (policy_code,),
+        )
+        if not policy:
+            raise HTTPException(status_code=400, detail="Unknown policy_code")
+        binding = fetch_one(
+            "SELECT owner_user_id, target_group_id FROM acl_bindings WHERE node_id=%s",
+            (int(node_id),),
+        ) or {}
+        if "target_group_id" in fields_set:
+            target_group_id = as_int(data.target_group_id)
+        else:
+            target_group_id = as_int(binding.get("target_group_id"))
+        group_required = policy_requires_target_group(policy)
+        if group_required and target_group_id is not None:
+            group = fetch_one("SELECT group_id FROM org_groups WHERE group_id=%s AND is_active=TRUE", (target_group_id,))
+            if not group:
+                raise HTTPException(status_code=400, detail="Unknown active target_group_id")
+        if group_required and target_group_id is None:
+            raise HTTPException(status_code=400, detail="target_group_id is required for GROUP policy")
+        owner_user_id = as_int(binding.get("owner_user_id")) or as_int(row.get("created_by")) or as_int(row.get("kb_owner_user_id")) or user_id
+        ensure_acl(int(node_id), policy_code, owner_user_id=owner_user_id, target_group_id=target_group_id if group_required else None)
+        acl_changed = True
 
     if not sets:
-        return {"message": "蹂寃??놁쓬"}
+        if acl_changed:
+            object_id = as_int(row.get("doc_id"))
+            if object_id is not None:
+                ensure_ai_document_info(object_id)
+                enqueue_ai_metadata_job(object_id, user_id)
+            return {"message": "Updated"}
+        return {"message": "No changes"}
 
-    sql = f"UPDATE tree_nodes SET {', '.join(sets)}, updated_at=NOW() WHERE node_id=%s"
-    params.append(node_id)
-    execute(sql, tuple(params))
+    params.append(int(node_id))
+    execute(f"UPDATE tree_nodes SET {', '.join(sets)}, updated_at=NOW() WHERE node_id=%s", tuple(params))
 
-    mirror_id = _get_linked_node_id(node_id)
-    if mirror_id:
-        mirror_sets: List[str] = []
-        mirror_params: List[Any] = []
-        if data.name is not None:
-            mirror_sets.append("name=%s")
-            mirror_params.append(new_name)
-        if provided_parent:
-            mirror_parent = _mirror_parent_for_new_node(new_parent, user_id)
-            if new_parent is None or mirror_parent is not None:
-                mirror_sets.append("parent_id=%s")
-                mirror_params.append(mirror_parent)
-        if provided_node_type and data.node_type is not None:
-            mirror_sets.append("node_type=%s")
-            mirror_params.append(new_node_type)
-            mirror_sets.append("is_folder=%s")
-            mirror_params.append(_is_folder_by_type(new_node_type))
-        if mirror_sets:
-            mirror_params.append(mirror_id)
-            execute(
-                f"UPDATE tree_nodes SET {', '.join(mirror_sets)}, updated_at=NOW() WHERE node_id=%s",
-                tuple(mirror_params),
-            )
+    descendants = collect_descendants([node_id])
+    if "parent_id" in fields_set or "item_type_code" in fields_set:
+        update_subtree_item_type(node_id, item_type_code, created_by=user_id)
+    if "parent_id" in fields_set or "name" in fields_set:
+        _refresh_storage_paths_for_nodes(descendants, enqueue_jobs=True)
+    if acl_changed:
+        object_id = as_int(row.get("doc_id"))
+        if object_id is not None:
+            ensure_ai_document_info(object_id)
+            enqueue_ai_metadata_job(object_id, user_id)
 
-    if row["tree_id"] == SE_KB_ID and _is_folder(row["tree_id"], node_id):
-        kb_root_id = _get_kb_root_linked_node_id(node_id)
-        if kb_root_id:
-            kb_tree = fetch_one("SELECT tree_id FROM tree_nodes WHERE node_id=%s", (kb_root_id,)) or {}
-            kb_tree_id = kb_tree.get("tree_id")
-            if kb_tree_id:
-                if data.name is not None:
-                    execute("UPDATE trees SET name=%s WHERE tree_id=%s", (new_name, kb_tree_id))
-                    execute(
-                        "UPDATE tree_nodes SET name=%s, updated_at=NOW() WHERE node_id=%s",
-                        (new_name, kb_root_id),
-                    )
-    return {"message": "?낅뜲?댄듃 ?꾨즺"}
+    return {"message": "Updated"}
+
 
 def _bulk_delete_nodes(kb_id: int, node_ids: List[int], user_id: int) -> Tuple[int, List[str]]:
-    info = _ensure_kb_tree(kb_id, user_id)
-    ids = list(dict.fromkeys(node_ids or []))
+    ids = [int(x) for x in dict.fromkeys(node_ids or []) if x is not None]
     if not ids:
         return 0, []
-
-    to_delete: Set[int] = set()
-    for nid in ids:
-        n = _fetch_node(nid)
-        if n and n["tree_id"] == kb_id:
-            if info["is_admin"] or _has_perm(user_id, nid, "w"):
-                to_delete.add(nid)
-                to_delete |= _collect_descendants(kb_id, nid)
-
-    if not to_delete:
+    all_ids = collect_descendants(ids)
+    if not all_ids:
         return 0, []
-
-    ph_link, args_link = _make_in_clause(sorted(to_delete))
-    if ph_link:
-        linked_rows = fetch_all(
-            f"""
-            SELECT linked_node_id AS nid
-              FROM node_links
-             WHERE link_type='MIRROR' AND node_id IN ({ph_link})
-            UNION
-            SELECT node_id AS nid
-              FROM node_links
-             WHERE link_type='MIRROR' AND linked_node_id IN ({ph_link})
-            """,
-            tuple(list(args_link) + list(args_link)),
-        )
-        for r in linked_rows or []:
-            try:
-                to_delete.add(int(r["nid"]))
-            except Exception:
-                continue
-
-        kb_link_rows = fetch_all(
-            f"""
-            SELECT node_id, linked_node_id
-              FROM node_links
-             WHERE link_type='KB_ROOT'
-               AND (node_id IN ({ph_link}) OR linked_node_id IN ({ph_link}))
-            """,
-            tuple(list(args_link) + list(args_link)),
-        )
-        kb_tree_ids: Set[int] = set()
-        for r in kb_link_rows or []:
-            a = r.get("node_id")
-            b = r.get("linked_node_id")
-            if a is None or b is None:
-                continue
-            a_row = fetch_one("SELECT tree_id FROM tree_nodes WHERE node_id=%s", (a,))
-            b_row = fetch_one("SELECT tree_id FROM tree_nodes WHERE node_id=%s", (b,))
-            if not a_row or not b_row:
-                continue
-            a_tree = int(a_row["tree_id"])
-            b_tree = int(b_row["tree_id"])
-            if a_tree == SE_KB_ID:
-                kb_tree_ids.add(b_tree)
-            elif b_tree == SE_KB_ID:
-                kb_tree_ids.add(a_tree)
-
-        if kb_tree_ids:
-            ph_kb, args_kb = _make_in_clause(sorted(kb_tree_ids))
-            execute(f"DELETE FROM tree_nodes WHERE tree_id IN ({ph_kb})", args_kb)
-            execute(f"DELETE FROM trees WHERE tree_id IN ({ph_kb})", args_kb)
-
-    orphan_docs = _collect_orphan_doc_master_ids_for_kb_delete(kb_id, list(to_delete))
-    orphan_objects = _collect_orphan_object_ids_for_kb_delete(kb_id, list(to_delete))
-    deletable_paths = _collect_paths_for_object_ids(orphan_objects)
-
-    placeholders = ", ".join(["%s"] * len(to_delete))
-
-    execute(f"DELETE FROM pf_node_props WHERE node_id IN ({placeholders})", tuple(to_delete))
-    execute(f"DELETE FROM tree_nodes   WHERE node_id IN ({placeholders})", tuple(to_delete))
-
-    if orphan_docs:
-        ph_d, args_d = _make_in_clause(sorted(orphan_docs))
-        execute(f"DELETE FROM doc_revisions WHERE doc_master_id IN ({ph_d})", args_d)
-        execute(f"DELETE FROM doc_master WHERE doc_master_id IN ({ph_d})", args_d)
-
-    if orphan_objects:
-        ph_o, args_o = _make_in_clause(sorted(orphan_objects))
-        execute(f"DELETE FROM doc_props WHERE object_id IN ({ph_o})", args_o)
-        execute(f"DELETE FROM storage_objects WHERE object_id IN ({ph_o})", args_o)
-
-    removed: List[str] = []
-    if DELETE_UPLOADS_ON_RECORD_DELETE and deletable_paths:
-        stats = _delete_files_safely(deletable_paths)
-        removed = sorted(list(deletable_paths))
-
-    return len(to_delete), removed
+    placeholders = ",".join(["%s"] * len(all_ids))
+    docs = fetch_all(
+        f"SELECT node_id, doc_id FROM tree_nodes WHERE doc_id IS NOT NULL AND node_id IN ({placeholders})",
+        tuple(all_ids),
+    )
+    for doc in docs or []:
+        if doc.get("doc_id") is not None:
+            _queue_delete_for_doc(int(doc["node_id"]), int(doc["doc_id"]), user_id)
+    if not docs:
+        empty_folder_ids = [
+            int(row["node_id"])
+            for row in fetch_all(
+                f"SELECT node_id FROM tree_nodes WHERE doc_id IS NULL AND node_id IN ({placeholders})",
+                tuple(all_ids),
+            )
+        ]
+        if empty_folder_ids:
+            ph = ",".join(["%s"] * len(empty_folder_ids))
+            execute(f"DELETE FROM tree_nodes WHERE node_id IN ({ph})", tuple(empty_folder_ids))
+    return len(all_ids), []
 
 
 def delete_kb_nodes_bulk(
@@ -1257,6 +1281,11 @@ def delete_kb_nodes_bulk(
     body: KBNodesBulkDeleteIn,
     user_id: int = Depends(get_current_user_id),
 ):
+    root = get_kb_entry(kb_id)
+    _require_kb_edit_access(root, user_id)
+    for node_id in body.node_ids:
+        if int(node_id) == int(root["node_id"]) or not _node_is_within_kb(int(node_id), int(root["node_id"])):
+            raise HTTPException(status_code=403, detail="Only descendants of the selected KB can be deleted")
     deleted, removed = _bulk_delete_nodes(kb_id, body.node_ids, user_id)
     return {"deleted": deleted, "files_removed": removed}
 
@@ -1266,8 +1295,7 @@ def delete_kb_nodes_bulk_safe(
     body: KBNodesBulkDeleteIn,
     user_id: int = Depends(get_current_user_id),
 ):
-    deleted, removed = _bulk_delete_nodes(kb_id, body.node_ids, user_id)
-    return {"deleted": deleted, "files_removed": removed}
+    return delete_kb_nodes_bulk(kb_id=kb_id, body=body, user_id=user_id)
 
 
 def delete_kb_nodes_bulk_post(
@@ -1275,8 +1303,7 @@ def delete_kb_nodes_bulk_post(
     body: KBNodesBulkDeleteIn,
     user_id: int = Depends(get_current_user_id),
 ):
-    deleted, removed = _bulk_delete_nodes(kb_id, body.node_ids, user_id)
-    return {"deleted": deleted, "files_removed": removed}
+    return delete_kb_nodes_bulk(kb_id=kb_id, body=body, user_id=user_id)
 
 
 def reorder_kb_nodes(
@@ -1284,88 +1311,90 @@ def reorder_kb_nodes(
     body: KBNodesReorderIn,
     user_id: int = Depends(get_current_user_id),
 ):
-    info = _ensure_kb_tree(kb_id, user_id)
+    root = get_kb_entry(kb_id)
+    _require_kb_edit_access(root, user_id)
+    parent_id = body.parent_id if body.parent_id is not None else int(root["node_id"])
+    if not _node_is_within_kb(int(parent_id), int(root["node_id"])):
+        raise HTTPException(status_code=403, detail="Reorder parent must belong to the selected KB")
     if not body.orders:
         return {"updated": 0}
-
     count = 0
     for node_id, sort_order in body.orders:
-        row = _fetch_node(node_id)
-        if not row or row["tree_id"] != kb_id:
+        row = get_node(int(node_id))
+        if not row:
             continue
-        if row["parent_id"] != body.parent_id:
+        _require_node_edit_access(row, user_id)
+        if not _node_is_within_kb(int(node_id), int(root["node_id"])):
+            raise HTTPException(status_code=403, detail="Only nodes in the selected KB can be reordered")
+        if as_int(row.get("parent_id")) != body.parent_id:
             continue
-        if not info["is_admin"] and not _has_perm(user_id, node_id, "w"):
-            continue
-        execute(
-            "UPDATE tree_nodes SET sort_order=%s, updated_at=NOW() WHERE node_id=%s",
-            (sort_order, node_id),
-        )
+        execute("UPDATE tree_nodes SET sort_order=%s, updated_at=NOW() WHERE node_id=%s", (int(sort_order), int(node_id)))
         count += 1
-
     return {"updated": count}
 
-def _get_table_columns(table: str) -> Set[str]:
-    rows = fetch_all(
-        """
-        SELECT COLUMN_NAME
-          FROM INFORMATION_SCHEMA.COLUMNS
-         WHERE TABLE_SCHEMA = DATABASE()
-           AND TABLE_NAME = %s
-        """,
-        (table,),
-    )
-    return {r["COLUMN_NAME"].lower() for r in (rows or [])}
-
-class KbCreateIn(BaseModel):
-    name: str
-    kb_type: Optional[str] = "admin"
-    is_user_kb: int = 0
-    kind: Optional[str] = "KB"
 
 def create_kb_tree(
     body: KbCreateIn,
     user_id: int = Depends(get_current_user_id),
 ):
-    u = _get_user_org_admin(user_id)
-    name = (body.name or "").strip()
+    _require_admin(user_id)
+    name = clean_node_name(body.name)
     if not name:
-        raise HTTPException(status_code=400, detail="name ?꾩슂")
+        raise HTTPException(status_code=400, detail="name is required")
 
-    have = _get_table_columns("trees")
+    se_root = fetch_one(
+        """
+        SELECT node_id, kb_root_id, kb_type, kb_owner_user_id
+          FROM tree_nodes
+         WHERE parent_id IS NULL
+         ORDER BY CASE WHEN name='SE KB' THEN 0 ELSE 1 END, node_id
+         LIMIT 1
+        """
+    )
+    if not se_root:
+        raise HTTPException(status_code=500, detail="SE KB root not found")
+    if _dup_alias_exists(int(se_root["node_id"]), name):
+        raise HTTPException(status_code=409, detail="A KB with the same name already exists")
+    item_type_code = next_item_type_code()
+    node_id = execute(
+        """
+        INSERT INTO tree_nodes(
+            parent_id, kb_root_id, kb_type, kb_owner_user_id, doc_id,
+            name, alias, is_folder, item_type_code, sort_order, created_by, created_at, updated_at
+        )
+        VALUES(%s,%s,'admin',%s,NULL,%s,%s,TRUE,%s,%s,%s,NOW(),NOW())
+        """,
+        (
+            int(se_root["node_id"]),
+            int(se_root["kb_root_id"]),
+            user_id,
+            name,
+            name,
+            item_type_code,
+            next_sort_order(int(se_root["node_id"])),
+            user_id,
+        ),
+        True,
+    )
+    ensure_acl(node_id, "PUBLIC", owner_user_id=user_id)
+    return {"kb_id": node_id, "id": node_id, "name": name, "kb_type": body.kb_type, "is_user_kb": body.is_user_kb, "kind": body.kind}
 
-    columns: List[str] = []
-    placeholders: List[str] = []
-    args: List[Any] = []
-
-    if "org_id" in have:
-        columns.append("org_id")
-        placeholders.append("%s")
-        args.append(u["org_id"])
-
-    columns.extend(["name", "kb_type", "is_user_kb", "kind"])
-    placeholders.extend(["%s", "%s", "%s", "%s"])
-    args.extend([name, body.kb_type, body.is_user_kb, body.kind])
-
-    if "created_at" in have:
-        columns.append("created_at")
-        placeholders.append("NOW()")
-    if "updated_at" in have:
-        columns.append("updated_at")
-        placeholders.append("NOW()")
-
-    sql = f"INSERT INTO trees ({', '.join(columns)}) VALUES ({', '.join(placeholders)})"
-    kb_id = execute(sql, tuple(args), True)
-
-    return {"kb_id": kb_id, "name": name, "kb_type": body.kb_type, "is_user_kb": body.is_user_kb, "kind": body.kind}
 
 def delete_kb_tree(
     kb_id: int,
     user_id: int = Depends(get_current_user_id),
 ):
-    info = _ensure_kb_tree(kb_id, user_id)
-    if not info["is_admin"]:
-        raise HTTPException(status_code=403, detail="Only admins can delete KB trees")
-    execute("DELETE FROM trees WHERE tree_id=%s", (kb_id,))
-    return {"ok": True, "kb_id": kb_id}
-
+    _require_admin(user_id)
+    root = get_kb_entry(kb_id)
+    if root.get("parent_id") is None:
+        raise HTTPException(status_code=400, detail="Root KB cannot be deleted")
+    ids = collect_descendants([kb_id])
+    ph = ",".join(["%s"] * len(ids))
+    docs = fetch_all(f"SELECT node_id, doc_id FROM tree_nodes WHERE doc_id IS NOT NULL AND node_id IN ({ph})", tuple(ids))
+    for doc in docs or []:
+        if doc.get("doc_id") is not None:
+            _queue_delete_for_doc(int(doc["node_id"]), int(doc["doc_id"]), user_id)
+    if not docs:
+        execute(f"DELETE FROM tree_nodes WHERE node_id IN ({ph})", tuple(ids))
+        return {"ok": True, "kb_id": kb_id, "deleted": "physical_empty_tree"}
+    return {"ok": True, "kb_id": kb_id, "deleted": "soft_pending"}

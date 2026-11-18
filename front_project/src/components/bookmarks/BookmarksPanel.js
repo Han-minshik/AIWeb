@@ -2,13 +2,11 @@ import React, { useCallback, useEffect, useState, useRef } from 'react';
 import ReactDOM from 'react-dom';
 import '../../styles/components/bookmarks.css';
 import {
-  listGroups,
   getBookmarkTree,
   createNode,
   patchNode,
   deleteNodes,
 } from '../../services/bookmarks/bookmarkService';
-import { copyDoc } from '../../services/docs/docService';
 import { dispatchOpenDocTab } from '../../utils/openDocTab';
 
 import ArrowRightIcon from '../../assets/icons/arrow-right.svg';
@@ -68,15 +66,14 @@ function collectDocIdsFromTree(nodes = []) {
   while (stack.length) {
     const cur = stack.pop();
     if (!cur) continue;
-    if (cur.meta?.target_type === 'DOC_MASTER') {
+    if ((cur?.node_type || '').toUpperCase() === 'ITEM') {
       const raw =
-        cur?.meta?.doc_id ||
-        cur?.meta?.doc_master_id ||
-        cur?.meta?.target_id ||
+        cur?.meta?.storage_id ||
         cur?.meta?.object_id ||
         cur?.meta?.objectId ||
         cur?.meta?.storage_object_id ||
-        cur?.meta?.storageObjectId;
+        cur?.meta?.storageObjectId ||
+        cur?.meta?.target_id;
       const n = Number(raw);
       if (Number.isFinite(n)) out.push(n);
     }
@@ -119,6 +116,8 @@ const getFileIcon = (node) => {
   if (ext === 'md') return MdIcon;
   return TextFileIcon;
 };
+
+const usesGenericTextFileIcon = (node) => getFileIcon(node) === TextFileIcon;
 
 const toSafeTitle = (title, docId) => {
   const t = String(title || '').trim();
@@ -195,10 +194,7 @@ function setDragBundle(dt, ids) {
 }
 
 export default function BookmarksPanel() {
-  const [groups, setGroups] = useState([]);
-  const [activeId, setActiveId] = useState(null);
   const [tree, setTree] = useState([]);
-  const [loadingG, setLoadingG] = useState(false);
   const [loadingT, setLoadingT] = useState(false);
 
   const [openMap, setOpenMap] = useState(() => new Set());
@@ -222,30 +218,10 @@ export default function BookmarksPanel() {
     );
   }, []);
 
-  const loadGroups = useCallback(async () => {
-    setLoadingG(true);
-    try {
-      const rows = await listGroups();
-      const arr = Array.isArray(rows) ? rows : [];
-      setGroups(arr);
-      if (arr.length && (activeId == null || !arr.find((g) => g.id === activeId))) {
-        setActiveId(arr[0].id);
-      }
-    } catch {
-      setGroups([]);
-    } finally {
-      setLoadingG(false);
-    }
-  }, [activeId]);
-
-  const loadTree = useCallback(async (gid) => {
-    if (!gid) {
-      setTree([]);
-      return;
-    }
+  const loadTree = useCallback(async () => {
     setLoadingT(true);
     try {
-      const res = await getBookmarkTree(gid);
+      const res = await getBookmarkTree();
       const nodes = res?.nodes || [];
       const normalized = nodes.map(normalizeNode);
       setTree(normalized);
@@ -261,13 +237,16 @@ export default function BookmarksPanel() {
   }, [emitBookmarkSelection]);
 
   useEffect(() => {
-    loadGroups();
-  }, [loadGroups]);
+    loadTree();
+  }, [loadTree]);
 
   useEffect(() => {
-    if (!activeId) return;
-    loadTree(activeId);
-  }, [activeId, loadTree]);
+    const onRefresh = () => {
+      loadTree();
+    };
+    window.addEventListener('bookmarks:refresh', onRefresh);
+    return () => window.removeEventListener('bookmarks:refresh', onRefresh);
+  }, [loadTree]);
 
   useEffect(() => {
     if (typeof document === 'undefined') return;
@@ -295,79 +274,61 @@ export default function BookmarksPanel() {
   };
 
   const openBookmark = (node) => {
-    if (!node || !node.meta?.target_type) return;
-    if (node.meta.target_type === 'DOC_MASTER') {
-      const meta = node?.meta || {};
-      const docId =
-        meta?.doc_id ||
-        meta?.doc_master_id ||
-        meta?.target_id;
-      const objectId =
-        meta?.object_id ||
-        meta?.objectId ||
-        meta?.storage_object_id ||
-        meta?.storageObjectId ||
-        null;
-      if (!docId) {
-        window.alert('Document information not found.');
-        return;
-      }
-      const fileRightRaw =
-        meta?.storage_object_file_right ||
-        meta?.file_right ||
-        meta?.fileRight ||
-        null;
-      const fileRight = String(fileRightRaw || '').trim().replace(/^\./, '') || null;
-      const baseName = meta?.storage_object_name || meta?.doc_title || node?.name || '';
-      const lookupTitle = buildLookupFilename(baseName, fileRight);
-      const docRelPath =
-        meta?.storage_object_relative_path ??
-        meta?.relative_path ??
-        meta?.doc_rel_path ??
-        null;
-      const docSubPath =
-        meta?.storage_object_sub_path ??
-        meta?.sub_path ??
-        meta?.doc_sub_path ??
-        null;
-      const docBranchType =
-        meta?.branch_type ??
-        meta?.doc_branch_type ??
-        null;
-      const docStoredPath =
-        meta?.stored_path ??
-        meta?.doc_stored_path ??
-        null;
-
-      dispatchOpenDoc({
-        docId,
-        title: toSafeTitle(node?.name, docId),
-        objectId,
-        docTitle: lookupTitle || toSafeTitle(node?.name, docId),
-        docRelPath,
-        docSubPath,
-        docFileRight: fileRight,
-        docStoredPath,
-        docBranchType,
-      });
-    } else {
-      window.alert('This bookmark type is not supported.');
-    }
-  };
-
-  const copyBookmarkTarget = async (node) => {
     if (!node) return;
-    if (node.meta?.target_type !== 'DOC_MASTER') {
-      window.alert('Copying is only supported on STORATE_OBJECT type.');
+    const meta = node?.meta || {};
+    const objectId =
+      meta?.storage_id ||
+      meta?.object_id ||
+      meta?.objectId ||
+      meta?.storage_object_id ||
+      meta?.storageObjectId ||
+      null;
+    const docId =
+      meta?.doc_id ||
+      meta?.doc_master_id ||
+      objectId;
+    if (!docId && !objectId) {
+      window.alert('Document information not found.');
       return;
     }
-    try {
-      const newName = `${node.name || 'Untitled'}_copy`;
-      await copyDoc(node.meta.target_id, { new_name: newName });
-      window.alert('A copied document has been created.');
-    } catch (e) {
-      window.alert(`Copy failed: ${e?.message || e}`);
-    }
+    const fileRightRaw =
+      meta?.storage_object_file_right ||
+      meta?.file_right ||
+      meta?.fileRight ||
+      null;
+    const fileRight = String(fileRightRaw || '').trim().replace(/^\./, '') || null;
+    const baseName = meta?.storage_object_name || meta?.doc_title || node?.name || '';
+    const lookupTitle = buildLookupFilename(baseName, fileRight);
+    const docRelPath =
+      meta?.storage_object_relative_path ??
+      meta?.relative_path ??
+      meta?.doc_rel_path ??
+      null;
+    const docSubPath =
+      meta?.storage_object_sub_path ??
+      meta?.sub_path ??
+      meta?.doc_sub_path ??
+      null;
+    const docBranchType =
+      meta?.branch_type ??
+      meta?.doc_branch_type ??
+      null;
+    const docStoredPath =
+      meta?.stored_path ??
+      meta?.doc_stored_path ??
+      null;
+
+    dispatchOpenDoc({
+      docId,
+      title: toSafeTitle(node?.name, docId),
+      objectId,
+      docTitle: lookupTitle || toSafeTitle(node?.name, docId),
+      docRelPath,
+      docSubPath,
+      docFileRight: fileRight,
+      docStoredPath,
+      docBranchType,
+    });
   };
 
   const renameNode = async (node) => {
@@ -375,26 +336,25 @@ export default function BookmarksPanel() {
     const name = window.prompt('New name', node.name);
     if (!name || name === node.name) return;
     await patchNode(node.id, { name });
-    await loadTree(activeId);
+    await loadTree();
   };
 
   const deleteNode = async (node) => {
-    if (!node || !activeId) return;
+    if (!node) return;
     if (!window.confirm('Delete?')) return;
-    await deleteNodes(activeId, [node.id]);
-    await loadTree(activeId);
+    await deleteNodes([node.id]);
+    await loadTree();
   };
 
   const createFolder = async (parentId = null) => {
-    if (!activeId) return;
     const name = window.prompt('Folder name');
     if (!name) return;
-    await createNode(activeId, {
+    await createNode({
       name,
       type: 'FOLDER',
       parent_id: parentId,
     });
-    await loadTree(activeId);
+    await loadTree();
   };
 
   const moveNodes = async (movingIds, newParentId) => {
@@ -405,11 +365,11 @@ export default function BookmarksPanel() {
         await patchNode(id, { parent_id: newParentId });
       }
       dragBundleRef.current = [];
-      await loadTree(activeId);
+      await loadTree();
     } catch (e) {
       window.alert(`Move failed: ${e?.message || e}`);
       dragBundleRef.current = [];
-      await loadTree(activeId);
+      await loadTree();
     }
   };
 
@@ -565,7 +525,7 @@ export default function BookmarksPanel() {
           }}
         >
           <img
-            className="node-icon"
+            className={`node-icon ${!isFolderNode && usesGenericTextFileIcon(n) ? 'node-icon--text' : ''}`}
             src={
               isFolderNode
                 ? opened
@@ -593,7 +553,6 @@ export default function BookmarksPanel() {
         const onNode = e.target.closest?.('.t-node');
         if (!onNode) {
           setSelectedIds(new Set());
-          emitBookmarkSelection([]);
         }
       }}
       onContextMenu={(e) => {
@@ -634,19 +593,6 @@ export default function BookmarksPanel() {
             }}
           >
             Open
-          </button>
-
-          <button
-            className="ctx-item"
-            onClick={async () => {
-              try {
-                await copyBookmarkTarget(ctx.node);
-              } finally {
-                setCtx(null);
-              }
-            }}
-          >
-            Create a copy
           </button>
 
           {ctx.node?.node_type === 'FOLDER' && (

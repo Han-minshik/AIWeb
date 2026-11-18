@@ -9,6 +9,22 @@ export default function Gallery({ images = [] }) {
   const containerRef = useRef(null);
 
   useEffect(() => {
+    const open = Boolean(modalImg);
+    try {
+      window.dispatchEvent(new CustomEvent('ui:image-viewer-state', { detail: { open } }));
+      document.body.classList.toggle('image-viewer-open', open);
+    } catch {}
+
+    return () => {
+      if (!open) return;
+      try {
+        window.dispatchEvent(new CustomEvent('ui:image-viewer-state', { detail: { open: false } }));
+        document.body.classList.remove('image-viewer-open');
+      } catch {}
+    };
+  }, [modalImg]);
+
+  useEffect(() => {
     const el = containerRef.current;
     if (!el) return;
 

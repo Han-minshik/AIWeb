@@ -1,4 +1,5 @@
 import React, { useEffect, useState } from 'react';
+import { Navigate } from 'react-router-dom';
 import { me } from '../../services/auth/authService';
 
 export default function AdminGuard({ children }) {
@@ -19,28 +20,26 @@ export default function AdminGuard({ children }) {
         if (alive) setLoading(false);
       }
     })();
-    return () => { alive = false; };
+    return () => {
+      alive = false;
+    };
   }, []);
 
   if (loading) {
     return (
       <div className="panel" style={{ height: '100%' }}>
-        <div className="panel-head"><div className="panel-title">Admin</div></div>
-        <div className="card"><div className="loading">Checking Permissions…</div></div>
+        <div className="panel-head">
+          <div className="panel-title">Admin</div>
+        </div>
+        <div className="card">
+          <div className="loading">Checking permissions...</div>
+        </div>
       </div>
     );
   }
 
   if (!allowed) {
-    return (
-      <div className="panel" style={{ height: '100%' }}>
-        <div className="panel-head"><div className="panel-title">Admin</div></div>
-        <div className="card" style={{ padding: 16 }}>
-          <h3 style={{ marginTop: 0 }}>403 — You don't have access.</h3>
-          <div className="muted">Ask your administrator for permissions or log in with a different account.</div>
-        </div>
-      </div>
-    );
+    return <Navigate to="/" replace />;
   }
 
   return <>{children}</>;

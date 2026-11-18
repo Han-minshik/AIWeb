@@ -1,14 +1,15 @@
 import React, { useCallback, useEffect, useMemo, useState, useRef } from 'react';
 import { http } from '../../services/http/client';
-import { copyDoc, moveDoc, createNote } from '../../services/docs/docService';
-import { addBookmark } from '../../services/bookmarks/bookmarkService';
+import { addBookmark, createNode as createBookmarkNode } from '../../services/bookmarks/bookmarkService';
 import { dispatchOpenDocTab } from '../../utils/openDocTab';
-import FolderPickerModal from '../modals/FolderPickerModal';
+import useDownload from '../../hooks/useDownload';
 import folderIcon from '../../assets/icons/colorFolder.svg';
 import openFolderIcon from '../../assets/icons/open-folder.svg';
 import arrowRightIcon from '../../assets/icons/arrow-right.svg';
 import arrowDownIcon from '../../assets/icons/arrow-down.svg';
 import ContextMenuPortal from './projectsTree/ContextMenuPortal';
+import FolderPickerModal from '../modals/FolderPickerModal';
+import VersionManagerModal from '../admin/kb/VersionManagerModal';
 import {
   FOLDER_INDEXING_STATE_BY_PATH,
   INDEXING_STATE_META,
@@ -20,13 +21,32 @@ import {
   normalizeNode,
   sameId,
   toId,
+  usesGenericTextFileIcon,
 } from './projectsTree/treeUtils';
 
 const MODE = {
   KB: 'kb',
 };
 
-export default function ProjectsTreePanel({ mode = MODE.KB, rootId = null }) {
+const DOC_STATUS_META = {
+  deleted_pending: {
+    label: 'Pending delete',
+    title: 'This document is missing locally and is pending deletion. Restore it from Maintenance > Deleted Docs.',
+  },
+  inactive_path_missing: {
+    label: 'Path missing',
+    title: 'The local file path is missing. Reconnect or restore it from Maintenance > Deleted Docs.',
+  },
+};
+
+const getDocStatusMeta = (node) => {
+  if (node?.is_folder) return null;
+  const status = String(node?.doc_status || node?.meta?.doc_status || '').trim().toLowerCase();
+  return DOC_STATUS_META[status] || null;
+};
+
+export default function ProjectsTreePanel({ mode = MODE.KB, rootId = null, autoSelectRoot = true }) {
+  const { downloadLatest } = useDownload();
   const [roots, setRoots] = useState([]);
   const [activeRootId, setActiveRootId] = useState(rootId ?? null);
 
@@ -41,10 +61,13 @@ export default function ProjectsTreePanel({ mode = MODE.KB, rootId = null }) {
   const lastAppliedRootRef = useRef(null);
 
   const [ctx, setCtx] = useState(null);
-  const [blankCtx, setBlankCtx] = useState(null);
+  const [hierarchyBusy, setHierarchyBusy] = useState(false);
+  const [moveFolderTarget, setMoveFolderTarget] = useState(null);
+  const [moveDocumentTarget, setMoveDocumentTarget] = useState(null);
+  const [versionDocumentTarget, setVersionDocumentTarget] = useState(null);
 
-  const [moveModalOpen, setMoveModalOpen] = useState(false);
-  const [moveTarget, setMoveTarget] = useState(null);
+  const [bookmarkConfirm, setBookmarkConfirm] = useState(null);
+  const [bookmarkSubmitting, setBookmarkSubmitting] = useState(false);
 
   const nodes = useMemo(() => {
     const raw = tree?.nodes || tree?.items || [];
@@ -89,10 +112,12 @@ export default function ProjectsTreePanel({ mode = MODE.KB, rootId = null }) {
       const arr = (Array.isArray(items) ? items : items?.items || []).map((k) => ({
         id: Number(k.kb_id ?? k.id ?? k.tree_id ?? k.kb_tree_id),
         name: k.name ?? k.title ?? `KB ${k.kb_id ?? k.id ?? ''}`,
+        kb_type: k.kb_type ?? k.kbType ?? null,
+        kb_owner_user_id: k.kb_owner_user_id ?? k.kbOwnerUserId ?? null,
       }));
       setRoots(arr);
 
-      if (rootId == null) {
+      if (rootId == null && autoSelectRoot) {
         const preferred = activeRootId ?? null;
         const exists = arr.some((r) => sameId(r.id, preferred));
         const nextId = exists ? preferred : arr[0]?.id ?? null;
@@ -100,19 +125,22 @@ export default function ProjectsTreePanel({ mode = MODE.KB, rootId = null }) {
       }
     } catch {
       setRoots([]);
-      if (rootId == null) {
+      if (rootId == null && autoSelectRoot) {
         setActiveRootId(null);
       }
     }
-  }, [rootId, activeRootId]);
+  }, [rootId, activeRootId, autoSelectRoot]);
 
   const fetchTree = useCallback(async () => {
     const rid = rootId ?? activeRootId;
-    if (!rid) return;
+    if (!rid) {
+      setTree({ nodes: [] });
+      return;
+    }
 
     setLoading(true);
     try {
-      const res = await http.get(`/kb/trees/${toId(rid)}/tree`);
+      const res = await http.get(`/kb/trees/${toId(rid)}/tree`, { include_empty_folders: false });
       setTree(res);
       setOpenMap((prev) => (prev.size ? prev : new Set()));
     } catch (err) {
@@ -126,6 +154,20 @@ export default function ProjectsTreePanel({ mode = MODE.KB, rootId = null }) {
       setLoading(false);
     }
   }, [activeRootId, rootId]);
+
+  useEffect(() => {
+    const refreshCurrentTree = () => {
+      fetchRoots();
+      fetchTree();
+    };
+
+    window.addEventListener('kb:personal-created', refreshCurrentTree);
+    window.addEventListener('kb:tree-refresh', refreshCurrentTree);
+    return () => {
+      window.removeEventListener('kb:personal-created', refreshCurrentTree);
+      window.removeEventListener('kb:tree-refresh', refreshCurrentTree);
+    };
+  }, [fetchRoots, fetchTree]);
 
   useEffect(() => {
     setRoots([]);
@@ -146,7 +188,7 @@ export default function ProjectsTreePanel({ mode = MODE.KB, rootId = null }) {
     if (!roots?.length) return;
 
     if (rootId == null) {
-      if (activeRootId == null || !roots.some((r) => sameId(r.id, activeRootId))) {
+      if (autoSelectRoot && (activeRootId == null || !roots.some((r) => sameId(r.id, activeRootId)))) {
         setActiveRootId(roots[0]?.id ?? null);
       }
     }
@@ -157,7 +199,7 @@ export default function ProjectsTreePanel({ mode = MODE.KB, rootId = null }) {
     setOpenMap(new Set());
     setSelectedIds(new Set());
     setActivePathIds([]);
-  }, [roots, activeRootId, rootId]);
+  }, [roots, activeRootId, rootId, autoSelectRoot]);
 
   useEffect(() => {
     fetchTree();
@@ -173,7 +215,6 @@ export default function ProjectsTreePanel({ mode = MODE.KB, rootId = null }) {
       });
       if (!inside) {
         setCtx(null);
-        setBlankCtx(null);
       }
     };
     document.addEventListener('mousedown', handler);
@@ -190,9 +231,6 @@ export default function ProjectsTreePanel({ mode = MODE.KB, rootId = null }) {
     pendingDefaultOpenRef.current = false;
     lastAppliedRootRef.current = Number(rid);
 
-    // Default open: keep Guidebook aligned with other top-level folders.
-    const excluded = new Set(['textbook']);
-
     const toExcludedKey = (raw) => {
       const s = String(raw || '').trim().toLowerCase();
       return s.replace(/^\s*\d+\s*[\.\)\-:]*\s*/, '');
@@ -201,7 +239,7 @@ export default function ProjectsTreePanel({ mode = MODE.KB, rootId = null }) {
     const nextOpen = new Set();
     for (const n of nodes) {
       const key = toExcludedKey(n?.name);
-      if (n?.is_folder && !excluded.has(key)) {
+      if (n?.is_folder) {
         nextOpen.add(n.id);
       }
     }
@@ -213,88 +251,12 @@ export default function ProjectsTreePanel({ mode = MODE.KB, rootId = null }) {
 
   const onContext = (e, node) => {
     e.preventDefault();
+    if (node?.disabled && !node?.is_folder) {
+      setCtx(null);
+      return;
+    }
     const pos = getContextMenuPos(e);
-    setBlankCtx(null);
     setCtx({ ...pos, node });
-  };
-
-  const isWriteEnabled = () => true;
-
-  const onCreateNode = async (parent = null) => {
-    if (!isWriteEnabled()) {
-      window.alert('Node creation is not supported in the current mode.');
-      return;
-    }
-    const name = window.prompt('Enter the node name');
-    if (!name) return;
-
-    const rid = rootId ?? activeRootId;
-    if (!rid) return;
-
-    try {
-      await http.post(`/kb/trees/${toId(rid)}/nodes`, {
-        name,
-        parent_id: parent ?? null,
-        node_type: 'KB_FOLDER',
-      });
-      await fetchTree();
-    } catch (err) {
-      if (err?.status === 409) {
-        window.alert('The same name already exists.');
-      } else if (err?.status === 403) {
-        window.alert('You do not have write permission. (Adding root subdirectories is only allowed for administrators)');
-      } else {
-        window.alert(`Node creation failed: ${err?.message || err}`);
-      }
-    }
-  };
-
-  const onRenameNode = async (node) => {
-    if (!isWriteEnabled()) {
-      window.alert('Renaming is not supported in the current mode.');
-      return;
-    }
-    const name = window.prompt('Please enter a new name', node?.name || '');
-    if (!name || name === node?.name) return;
-
-    try {
-      await http.patch(`/kb/trees/nodes/${node.id}`, { name });
-      await fetchTree();
-    } catch (err) {
-      if (err?.status === 409) {
-        window.alert('The same name already exists.');
-      } else if (err?.status === 403) {
-        window.alert('You do not have permission to change name.');
-      } else {
-        window.alert(`Rename failed: ${err?.message || err}`);
-      }
-    }
-  };
-
-  const onDeleteSelected = async () => {
-    if (!isWriteEnabled()) {
-      window.alert('Deletion is no supported in current mode.');
-      return;
-    }
-    const ids = Array.from(selectedIds);
-    if (!ids.length) return;
-    if (!window.confirm(`Delete selected ${ids.length} nodes?`)) return;
-
-    const rid = rootId ?? activeRootId;
-    if (!rid) return;
-
-    try {
-      await http.delete(`/kb/trees/${toId(rid)}/nodes:bulk`, { node_ids: ids });
-      setSelectedIds(new Set());
-      setActivePathIds([]);
-      await fetchTree();
-    } catch (err) {
-      if (err?.state === 403) {
-        window.alert('You do not have permission to delete.');
-      } else {
-        window.alert(`Delete failed: ${err?.message || err}`);
-      }
-    }
   };
 
   const toSafeTitle = (title, docId) => {
@@ -302,6 +264,274 @@ export default function ProjectsTreePanel({ mode = MODE.KB, rootId = null }) {
     if (t) return t;
     if (docId != null) return `Doc ${docId}`;
     return 'Doc';
+  };
+
+  const emitToast = (message, type = 'info') => {
+    try {
+      window.dispatchEvent(new CustomEvent('ui:toast', { detail: { message, type } }));
+    } catch {}
+  };
+
+  const getStorageId = (node) =>
+    node?.meta?.object_id ||
+    node?.meta?.objectId ||
+    node?.meta?.storage_object_id ||
+    node?.meta?.storageObjectId ||
+    null;
+
+  const getDocumentId = (node) =>
+    node?.meta?.doc_id ||
+    node?.meta?.docId ||
+    node?.doc_id ||
+    null;
+
+  const getNodeKbType = (node) =>
+    String(node?.kb_type || node?.kbType || node?.meta?.kb_type || node?.meta?.kbType || '').trim().toLowerCase();
+
+  const getNodeUploadMode = (node) =>
+    String(node?.upload_mode || node?.uploadMode || node?.meta?.upload_mode || node?.meta?.uploadMode || '')
+      .trim()
+      .toLowerCase();
+
+  const isPersonalKbNode = (node) => {
+    let cur = node;
+    const guard = new Set();
+    while (cur && !guard.has(cur.id)) {
+      guard.add(cur.id);
+      const kbType = getNodeKbType(cur);
+      const uploadMode = getNodeUploadMode(cur);
+      if (kbType === 'personal' || kbType === 'person' || uploadMode === 'personal') return true;
+      const parentId = cur.parent ?? idToParent.get(cur.id) ?? null;
+      cur = parentId == null ? null : idToNode.get(parentId);
+    }
+
+    const rid = rootId ?? activeRootId;
+    const root = roots.find((r) => sameId(r.id, rid));
+    const rootType = String(root?.kb_type || root?.kbType || '').trim().toLowerCase();
+    return rootType === 'personal' || rootType === 'person';
+  };
+
+  const selectedRootId = toId(rootId ?? activeRootId);
+  const selectedRoot = roots.find((root) => sameId(root.id, selectedRootId));
+  const canEditPersonalHierarchy = ['personal', 'person'].includes(
+    String(selectedRoot?.kb_type || '').trim().toLowerCase()
+  );
+
+  const runHierarchyAction = async (action) => {
+    if (!canEditPersonalHierarchy || !selectedRootId || hierarchyBusy) return;
+    setHierarchyBusy(true);
+    try {
+      await action();
+      await fetchTree();
+    } catch (error) {
+      window.alert(error?.userMessage || error?.message || 'Personal KB hierarchy update failed.');
+    } finally {
+      setHierarchyBusy(false);
+      setCtx(null);
+    }
+  };
+
+  const createPersonalFolder = (parentId = selectedRootId) => {
+    const name = window.prompt('New folder name');
+    if (!name?.trim()) return;
+    runHierarchyAction(async () => {
+      await http.post(`/kb/trees/${selectedRootId}/nodes`, {
+        name: name.trim(),
+        parent_id: toId(parentId) || selectedRootId,
+        node_type: 'KB_FOLDER',
+      });
+      emitToast(`Folder "${name.trim()}" created.`, 'success');
+    });
+  };
+
+  const renamePersonalFolder = (node) => {
+    const name = window.prompt('Folder name', node?.name || '');
+    if (!name?.trim() || name.trim() === String(node?.name || '').trim()) return;
+    runHierarchyAction(async () => {
+      await http.patch(`/kb/trees/nodes/${toId(node.id)}`, { name: name.trim() });
+      emitToast(`Folder renamed to "${name.trim()}".`, 'success');
+    });
+  };
+
+  const renamePersonalDocument = (node) => {
+    const name = window.prompt('Document display name', node?.name || '');
+    if (!name?.trim() || name.trim() === String(node?.name || '').trim()) return;
+    runHierarchyAction(async () => {
+      await http.patch(`/kb/trees/nodes/${toId(node.id)}`, { name: name.trim() });
+      emitToast(`Document renamed to "${name.trim()}".`, 'success');
+    });
+  };
+
+  const moveFolderExcludedIds = useMemo(() => {
+    const excluded = [];
+    const walk = (node) => {
+      if (!node) return;
+      excluded.push(toId(node.id));
+      (node.children || []).forEach(walk);
+    };
+    walk(moveFolderTarget);
+    return excluded.filter(Boolean);
+  }, [moveFolderTarget]);
+
+  const movePersonalFolder = (node) => {
+    setCtx(null);
+    setMoveFolderTarget(node);
+  };
+
+  const confirmMovePersonalFolder = (pickedFolderId) => {
+    if (!moveFolderTarget) return;
+    const targetId = pickedFolderId == null ? selectedRootId : toId(pickedFolderId);
+    if (!targetId || sameId(targetId, moveFolderTarget.parent)) {
+      setMoveFolderTarget(null);
+      return;
+    }
+    const movingNode = moveFolderTarget;
+    runHierarchyAction(async () => {
+      await http.patch(`/kb/trees/nodes/${toId(movingNode.id)}`, { parent_id: targetId });
+      emitToast(`Folder "${movingNode.name}" moved.`, 'success');
+    });
+    setMoveFolderTarget(null);
+  };
+
+  const deletePersonalFolder = (node) => {
+    const confirmed = window.confirm(
+      `Delete folder "${node?.name || ''}"? Documents below it will follow the existing logical-delete policy.`
+    );
+    if (!confirmed) return;
+    runHierarchyAction(async () => {
+      await http.post(`/kb/trees/${selectedRootId}/nodes/bulk-delete`, { node_ids: [toId(node.id)] });
+      emitToast(`Folder "${node.name}" delete request completed.`, 'success');
+    });
+  };
+
+  const deletePersonalDocument = (node) => {
+    const nodeId = toId(node?.id);
+    if (!nodeId) {
+      window.alert('This document cannot be deleted because its node ID is missing.');
+      setCtx(null);
+      return;
+    }
+    const confirmed = window.confirm(
+      `Delete document "${node?.name || ''}"? You can restore it from Personal KB Management before permanent deletion.`
+    );
+    if (!confirmed) return;
+    runHierarchyAction(async () => {
+      await http.post(`/kb/trees/${selectedRootId}/nodes/bulk-delete`, { node_ids: [nodeId] });
+      emitToast(`Document "${node?.name || ''}" delete request completed.`, 'success');
+      window.dispatchEvent(new CustomEvent('kb:personal-created'));
+    });
+  };
+
+  const movePersonalDocument = (node) => {
+    setCtx(null);
+    setMoveDocumentTarget(node);
+  };
+
+  const managePersonalDocumentVersions = (node) => {
+    const docId = getDocumentId(node);
+    setCtx(null);
+    if (!docId) {
+      window.alert('This document cannot be versioned because its document ID is missing.');
+      return;
+    }
+    setVersionDocumentTarget({
+      id: toId(docId),
+      title: toSafeTitle(node?.name, docId),
+    });
+  };
+
+  const confirmMovePersonalDocument = (pickedFolderId) => {
+    if (!moveDocumentTarget) return;
+    const targetId = pickedFolderId == null ? selectedRootId : toId(pickedFolderId);
+    if (!targetId || sameId(targetId, moveDocumentTarget.parent)) {
+      setMoveDocumentTarget(null);
+      return;
+    }
+
+    const movingNode = moveDocumentTarget;
+    const documentId =
+      getStorageId(movingNode) ||
+      movingNode?.meta?.doc_id ||
+      movingNode?.meta?.docId ||
+      movingNode?.doc_id;
+
+    if (!documentId) {
+      window.alert('This document cannot be moved because its document ID is missing.');
+      setMoveDocumentTarget(null);
+      return;
+    }
+
+    runHierarchyAction(async () => {
+      await http.post(`/docs/${documentId}/move`, { new_parent_node: targetId });
+      emitToast(`Document "${movingNode.name}" moved.`, 'success');
+      window.dispatchEvent(new CustomEvent('kb:personal-created'));
+    });
+    setMoveDocumentTarget(null);
+  };
+  const requestDownload = async (node) => {
+    const docId = node?.meta?.doc_id || node?.meta?.docId || node?.doc_id || null;
+    if (!docId) {
+      window.alert('This document cannot be downloaded because its document ID is missing.');
+      setCtx(null);
+      return;
+    }
+    setCtx(null);
+    try {
+      await downloadLatest(docId);
+      emitToast(`Download started: ${node?.name || `Document ${docId}`}`, 'success');
+    } catch (error) {
+      window.alert(error?.userMessage || error?.message || 'Download failed.');
+    }
+  };
+
+  const countBookmarkFiles = (node) => {
+    if (!node) return 0;
+    if (isPersonalKbNode(node)) return 0;
+    if (!node.is_folder) return !node.disabled && getStorageId(node) ? 1 : 0;
+    return (node.children || []).reduce((sum, child) => sum + countBookmarkFiles(child), 0);
+  };
+
+  const addBookmarkFile = async (node, parentId = null) => {
+    if (isPersonalKbNode(node)) return { added: 0, skipped: 1 };
+    if (node?.disabled) return { added: 0, skipped: 1 };
+    const storageId = getStorageId(node);
+    if (!storageId) return { added: 0, skipped: 1 };
+    const title = toSafeTitle(node?.name, storageId);
+    await addBookmark({
+      storage_id: storageId,
+      title,
+      parent_id: parentId,
+    });
+    return { added: 1, skipped: 0 };
+  };
+
+  const addBookmarkFolderTree = async (node, parentId = null) => {
+    if (isPersonalKbNode(node)) return { added: 0, skipped: 1, folders: 0 };
+    const folderName = toSafeTitle(node?.name, node?.id);
+    const created = await createBookmarkNode({
+      name: folderName,
+      type: 'FOLDER',
+      parent_id: parentId,
+    });
+    const nextParentId = created?.id ?? created?.node_id;
+    let added = 0;
+    let skipped = 0;
+    let folders = 1;
+
+    for (const child of node.children || []) {
+      if (child?.is_folder) {
+        const result = await addBookmarkFolderTree(child, nextParentId);
+        added += result.added;
+        skipped += result.skipped;
+        folders += result.folders;
+      } else {
+        const result = await addBookmarkFile(child, nextParentId);
+        added += result.added;
+        skipped += result.skipped;
+      }
+    }
+
+    return { added, skipped, folders };
   };
 
   const dispatchOpenDoc = (
@@ -312,7 +542,8 @@ export default function ProjectsTreePanel({ mode = MODE.KB, rootId = null }) {
     subPath = null,
     fileRight = null,
     fileNameForLookup = null,
-    branchType = null
+    branchType = null,
+    isPersonal = false
   ) => {
     if (!docId) return;
     const safeTitle = toSafeTitle(title, docId);
@@ -325,10 +556,14 @@ export default function ProjectsTreePanel({ mode = MODE.KB, rootId = null }) {
       docSubPath: subPath ?? null,
       docFileRight: fileRight ?? null,
       docBranchType: branchType ?? null,
+      isPersonal: !!isPersonal,
+      kbType: isPersonal ? 'personal' : null,
+      uploadMode: isPersonal ? 'personal' : null,
     });
   };
 
   const onOpenNode = (node) => {
+    if (node?.disabled && !node?.is_folder) return;
     if (node.is_folder) {
       setOpenMap((prev) => {
         const next = new Set(prev);
@@ -371,11 +606,12 @@ export default function ProjectsTreePanel({ mode = MODE.KB, rootId = null }) {
       }
       if (subPath != null && String(subPath).trim() === '') subPath = null;
 
-      dispatchOpenDoc(docId, title, objectId, relPath, subPath, fileRight, fileNameForLookup, branchType);
+      dispatchOpenDoc(docId, title, objectId, relPath, subPath, fileRight, fileNameForLookup, branchType, isPersonalKbNode(node));
     }
   };
 
   const onOpenInNewTab = (node) => {
+    if (node?.disabled && !node?.is_folder) return;
     const docId = node?.meta?.doc_id || node?.meta?.docId || node?.doc_id || node?.id;
     const objectId =
       node?.meta?.object_id ||
@@ -408,36 +644,61 @@ export default function ProjectsTreePanel({ mode = MODE.KB, rootId = null }) {
     }
     if (subPath != null && String(subPath).trim() === '') subPath = null;
 
-    dispatchOpenDoc(docId, title, objectId, relPath, subPath, fileRight, fileNameForLookup, branchType);
+    dispatchOpenDoc(docId, title, objectId, relPath, subPath, fileRight, fileNameForLookup, branchType, isPersonalKbNode(node));
   };
 
-  const moveNodes = async (movingIds, newParent) => {
-    if (!isWriteEnabled()) return;
-    if (!Array.isArray(movingIds) || movingIds.length === 0) return;
+  const requestAddBookmark = (node) => {
+    if (isPersonalKbNode(node) && node?.is_folder) {
+      window.alert('My KB folders cannot be bookmarked. Select a document instead.');
+      return;
+    }
+    if (node?.disabled && !node?.is_folder) {
+      window.alert('This document is unavailable and cannot be bookmarked.');
+      return;
+    }
+    if (node?.is_folder) {
+      setBookmarkConfirm({
+        type: 'folder',
+        node,
+        title: toSafeTitle(node?.name, node?.id),
+        fileCount: countBookmarkFiles(node),
+      });
+      return;
+    }
 
+    const storageId = getStorageId(node);
+    if (!storageId) {
+      window.alert('No storage object is linked to this file.');
+      return;
+    }
+    const title = toSafeTitle(node?.name, storageId);
+    setBookmarkConfirm({ node, storageId, title });
+  };
+
+  const confirmAddBookmark = async () => {
+    if (!bookmarkConfirm || bookmarkSubmitting) return;
+    setBookmarkSubmitting(true);
     try {
-      for (const id of movingIds) {
-        await http.patch(`/kb/trees/nodes/${id}`, { parent_id: newParent ?? null });
-      }
-      await fetchTree();
-    } catch (err) {
-      const msg = err && err.message ? String(err.message) : '';
-      if (err?.status === 409) {
-        window.alert('Cannot be moved because the same name already exists.');
-      } else if (err?.status === 400) {
-        if (msg.includes('Parent is folder') || msg.toLowerCase().includes('parent')) {
-          window.alert('Move failed: Parent must be a folder.');
-        } else if (msg.includes('Descendants') || msg.toLowerCase().includes('descendant')) {
-          window.alert('Move failed: Cannot set parent to child.');
-        } else if (msg.includes('Yourself') || msg.toLowerCase().includes('itself')) {
-          window.alert('Move failed: Cannot set parent to self.');
-        } else {
-          window.alert(`Move failed: ${msg || 'Request denied.'}`);
-        }
+      if (bookmarkConfirm.type === 'folder') {
+        const result = await addBookmarkFolderTree(bookmarkConfirm.node);
+        emitToast(
+          `Added "${bookmarkConfirm.title}" to bookmarks. ${result.folders} folder(s), ${result.added} file(s).`,
+          'success'
+        );
       } else {
-        window.alert(`Move failed: ${msg || err}`);
+        await addBookmark({
+          storage_id: bookmarkConfirm.storageId,
+          title: bookmarkConfirm.title,
+        });
+        emitToast(`Added "${bookmarkConfirm.title}" to bookmarks.`, 'success');
       }
-      await fetchTree();
+      window.dispatchEvent(new Event('bookmarks:refresh'));
+      window.dispatchEvent(new CustomEvent('bookmarks:open-panel', { detail: { storageId: bookmarkConfirm.storageId } }));
+      setBookmarkConfirm(null);
+    } catch (e) {
+      window.alert(`Bookmark failed: ${e?.message || e}`);
+    } finally {
+      setBookmarkSubmitting(false);
     }
   };
 
@@ -493,6 +754,8 @@ export default function ProjectsTreePanel({ mode = MODE.KB, rootId = null }) {
     const fileSelected = !node.is_folder && selectedIds.has(node.id);
     const opened = node.is_folder ? openMap.has(node.id) : false;
     const hasChildren = node.is_folder && Array.isArray(node.children) && node.children.length > 0;
+    const statusMeta = getDocStatusMeta(node);
+    const unavailable = Boolean(statusMeta) || Boolean(node.disabled && !node.is_folder);
 
     const folderPathActive = node.is_folder && activePathSet.has(node.id);
     const indexingMeta = getFolderIndexingMeta(node);
@@ -504,13 +767,15 @@ export default function ProjectsTreePanel({ mode = MODE.KB, rootId = null }) {
         key={node.id}
         className={`t-node ${fileSelected ? 'file-selected' : ''} ${
           folderPathActive ? 'path-active' : ''
-        } ${node.is_folder ? 'folder' : 'file'} ${hasChildren ? 'has-children' : 'no-children'}`}
+        } ${node.is_folder ? 'folder' : 'file'} ${hasChildren ? 'has-children' : 'no-children'} ${
+          unavailable ? 'is-unavailable' : ''
+        }`}
         data-node-id={node.id}
         onContextMenu={(e) => {
           e.stopPropagation();
           onContext(e, node);
         }}
-        title={node.name}
+        title={statusMeta?.title || node.name}
       >
         {hasChildren ? (
           <button
@@ -531,8 +796,10 @@ export default function ProjectsTreePanel({ mode = MODE.KB, rootId = null }) {
         <span
           className="leaf"
           role="button"
-          tabIndex={0}
+          tabIndex={unavailable ? -1 : 0}
+          aria-disabled={unavailable}
           onKeyDown={(e) => {
+            if (unavailable) return;
             if (e.key !== 'Enter' && e.key !== ' ') return;
             e.preventDefault();
             e.stopPropagation();
@@ -540,6 +807,7 @@ export default function ProjectsTreePanel({ mode = MODE.KB, rootId = null }) {
           }}
           onClick={(e) => {
             e.stopPropagation();
+            if (unavailable) return;
 
             if (e.ctrlKey || e.metaKey) {
               const next = new Set(selectedIds);
@@ -566,8 +834,14 @@ export default function ProjectsTreePanel({ mode = MODE.KB, rootId = null }) {
             }
           }}
         >
-          <img className="node-icon" src={iconSrc} alt="" aria-hidden="true" />
+          <img
+            className={`node-icon ${!node.is_folder && usesGenericTextFileIcon(node) ? 'node-icon--text' : ''}`}
+            src={iconSrc}
+            alt=""
+            aria-hidden="true"
+          />
           <span className="label">{node.name}</span>
+          {statusMeta && <span className="node-status-badge">{statusMeta.label}</span>}
           {indexingMeta && (
             <span
               className={`node-indexing-badge ${indexingMeta.className}`}
@@ -598,9 +872,12 @@ export default function ProjectsTreePanel({ mode = MODE.KB, rootId = null }) {
         const onNode = e.target.closest?.('.t-node');
         if (!onNode) {
           e.preventDefault();
-          setCtx(null);
-          const pos = getContextMenuPos(e);
-          setBlankCtx(pos);
+          if (canEditPersonalHierarchy) {
+            const pos = getContextMenuPos(e);
+            setCtx({ ...pos, node: null, root: true });
+          } else {
+            setCtx(null);
+          }
         }
       }}
     >
@@ -616,156 +893,175 @@ export default function ProjectsTreePanel({ mode = MODE.KB, rootId = null }) {
 
       {ctx && (
         <ContextMenuPortal x={ctx.x} y={ctx.y}>
-          <button
-            className="ctx-item"
-            onClick={() => {
-              onOpenInNewTab(ctx.node);
-              setCtx(null);
-            }}
-          >
-            Open in new tab
-          </button>
-          <button
-            className="ctx-item"
-            onClick={async () => {
-              const docId = ctx.node?.meta?.doc_id || ctx.node?.meta?.docId || ctx.node?.doc_id || ctx.node?.id;
-              if (!docId) {
-                window.alert('Select a file.');
+          {canEditPersonalHierarchy && ctx.root && (
+            <button
+              className="ctx-item"
+              disabled={hierarchyBusy}
+              onClick={() => createPersonalFolder(selectedRootId)}
+            >
+              New folder
+            </button>
+          )}
+          {canEditPersonalHierarchy && ctx.node?.is_folder && (
+            <>
+              <button className="ctx-item" disabled={hierarchyBusy} onClick={() => createPersonalFolder(ctx.node.id)}>
+                New subfolder
+              </button>
+              <button className="ctx-item" disabled={hierarchyBusy} onClick={() => renamePersonalFolder(ctx.node)}>
+                Rename folder
+              </button>
+              <button className="ctx-item" disabled={hierarchyBusy} onClick={() => movePersonalFolder(ctx.node)}>
+                Move folder
+              </button>
+              <button className="ctx-item" disabled={hierarchyBusy} onClick={() => deletePersonalFolder(ctx.node)}>
+                Delete folder
+              </button>
+            </>
+          )}
+          {ctx.node && !ctx.node.is_folder && (
+            <>
+              <button
+                className="ctx-item"
+                onClick={() => {
+                  onOpenInNewTab(ctx.node);
+                  setCtx(null);
+                }}
+              >
+                Open in new tab
+              </button>
+              <button className="ctx-item" onClick={() => requestDownload(ctx.node)}>
+                Download original
+              </button>
+              {canEditPersonalHierarchy && isPersonalKbNode(ctx.node) && (
+                <>
+                  <button
+                    className="ctx-item"
+                    disabled={hierarchyBusy}
+                    onClick={() => renamePersonalDocument(ctx.node)}
+                  >
+                    Rename document
+                  </button>
+                  <button
+                    className={'ctx-item'}
+                    disabled={hierarchyBusy}
+                    onClick={() => managePersonalDocumentVersions(ctx.node)}
+                  >
+                    Version management
+                  </button>
+                  <button
+                    className="ctx-item"
+                    disabled={hierarchyBusy}
+                    onClick={() => movePersonalDocument(ctx.node)}
+                  >
+                    Move document
+                  </button>
+                  <button
+                    className="ctx-item"
+                    disabled={hierarchyBusy}
+                    onClick={() => deletePersonalDocument(ctx.node)}
+                  >
+                    Delete document
+                  </button>
+                </>
+              )}
+            </>
+          )}
+          {ctx.node && (!isPersonalKbNode(ctx.node) || !ctx.node?.is_folder) && (
+            <button
+              className="ctx-item"
+              onClick={() => {
+                requestAddBookmark(ctx.node);
                 setCtx(null);
-                return;
-              }
-              try {
-                await copyDoc(docId, { new_name: `${ctx.node.name}_copy` });
-                await fetchTree();
-              } catch (e) {
-                window.alert(`Copy failed: ${e?.message || e}`);
-              } finally {
-                setCtx(null);
-              }
-            }}
-          >
-            Create a copy
-          </button>
-          <button
-            className="ctx-item"
-            onClick={() => {
-              setMoveTarget(ctx.node);
-              setMoveModalOpen(true);
-              setCtx(null);
-            }}
-          >
-            Move to...
-          </button>
-          <button
-            className="ctx-item"
-            onClick={async () => {
-              const docId = ctx.node?.meta?.doc_id || ctx.node?.meta?.docId || ctx.node?.doc_id || ctx.node?.id;
-              if (!docId) {
-                window.alert('Select file.');
-                setCtx(null);
-                return;
-              }
-              try {
-                await addBookmark({
-                  target_type: 'DOC_MASTER',
-                  target_id: docId,
-                  title: ctx.node.name,
-                  preferred_node_id: ctx.node.id,
-                });
-
-                window.dispatchEvent(new Event('bookmarks:refresh'));
-              } catch (e) {
-                window.alert(`Bookmark failed: ${e?.message || e}`);
-              } finally {
-                setCtx(null);
-              }
-            }}
-          >
-            Bookmarks??
-          </button>
-          <button
-            className="ctx-item"
-            onClick={() => {
-              onRenameNode(ctx.node);
-              setCtx(null);
-            }}
-          >
-            Change name
-          </button>
-          <button
-            className="ctx-item danger"
-            onClick={() => {
-              setSelectedIds(new Set([ctx.node.id]));
-              onDeleteSelected();
-              setCtx(null);
-            }}
-          >
-            Delete
-          </button>
-        </ContextMenuPortal>
-      )}
-
-      {blankCtx && (
-        <ContextMenuPortal x={blankCtx.x} y={blankCtx.y}>
-          <button
-            className="ctx-item"
-            onClick={async () => {
-              try {
-                const title = window.prompt('Enter a note title');
-                if (!title) return;
-                await createNote({ title });
-                await fetchTree();
-              } catch (e) {
-                window.alert(`Note creation failed: ${e?.message || e}`);
-              } finally {
-                setBlankCtx(null);
-              }
-            }}
-          >
-            New note
-          </button>
-          <button
-            className="ctx-item"
-            onClick={() => {
-              onCreateNode(null);
-              setBlankCtx(null);
-            }}
-          >
-            New folder
-          </button>
+              }}
+            >
+              Add to bookmarks
+            </button>
+          )}
         </ContextMenuPortal>
       )}
 
       <FolderPickerModal
-        open={moveModalOpen}
+        open={Boolean(moveFolderTarget)}
         onClose={() => {
-          setMoveModalOpen(false);
-          setMoveTarget(null);
+          if (!hierarchyBusy) setMoveFolderTarget(null);
         }}
-        activeRootId={rootId ?? activeRootId}
-        title="Select folder to move"
-        onPick={async (parentId) => {
-          try {
-            const n = moveTarget;
-            if (n?.is_folder) {
-              await moveNodes([n.id], parentId ?? null);
-            } else {
-              const docId = n?.meta?.doc_id || n?.meta?.docId || n?.doc_id || n?.id;
-              if (docId) {
-                await moveDoc(docId, { new_parent: parentId ?? null });
-              } else {
-                await moveNodes([n.id], parentId ?? null);
-              }
-            }
-            await fetchTree();
-          } catch (e) {
-            window.alert(`Move failed: ${e?.message || e}`);
-          } finally {
-            setMoveModalOpen(false);
-            setMoveTarget(null);
-          }
-        }}
+        onPick={confirmMovePersonalFolder}
+        activeRootId={selectedRootId}
+        title={moveFolderTarget ? `Move "${moveFolderTarget.name}"` : 'Move folder'}
+        rootLabel={`${selectedRoot?.name || 'Personal KB'} (root)`}
+        excludeIds={moveFolderExcludedIds}
+        initialSelected={
+          moveFolderTarget && !sameId(moveFolderTarget.parent, selectedRootId)
+            ? toId(moveFolderTarget.parent)
+            : null
+        }
       />
+
+      <FolderPickerModal
+        open={Boolean(moveDocumentTarget)}
+        onClose={() => {
+          if (!hierarchyBusy) setMoveDocumentTarget(null);
+        }}
+        onPick={confirmMovePersonalDocument}
+        activeRootId={selectedRootId}
+        title={moveDocumentTarget ? `Move "${moveDocumentTarget.name}"` : 'Move document'}
+        rootLabel={`${selectedRoot?.name || 'Personal KB'} (root)`}
+        initialSelected={
+          moveDocumentTarget && !sameId(moveDocumentTarget.parent, selectedRootId)
+            ? toId(moveDocumentTarget.parent)
+            : null
+        }
+      />
+      <VersionManagerModal
+        open={Boolean(versionDocumentTarget)}
+        docId={versionDocumentTarget?.id}
+        docTitle={versionDocumentTarget?.title}
+        onClose={() => setVersionDocumentTarget(null)}
+      />
+      {bookmarkConfirm && (
+        <div className="modal-backdrop" role="presentation">
+          <div className="modal" role="dialog" aria-modal="true" aria-label="Add bookmark confirmation">
+            <div className="modal-head">
+              <div className="modal-title">Add Bookmark</div>
+            </div>
+            <div className="modal-body" style={{ padding: '18px 20px', background: 'var(--bg-elev, #fff)' }}>
+              <div style={{ fontSize: 14, lineHeight: 1.5, color: 'var(--text, #222)' }}>
+                {bookmarkConfirm.type === 'folder' ? (
+                  <>
+                    Add <strong>"{bookmarkConfirm.title}"</strong> and all nested folders/files to bookmarks?
+                    <br />
+                    <span style={{ color: 'var(--muted, #666)' }}>
+                      {bookmarkConfirm.fileCount} file(s) will be included.
+                    </span>
+                  </>
+                ) : (
+                  <>
+                    Add <strong>"{bookmarkConfirm.title}"</strong> to bookmarks?
+                  </>
+                )}
+              </div>
+            </div>
+            <div className="modal-foot">
+              <button
+                type="button"
+                className="btn ghost"
+                onClick={() => setBookmarkConfirm(null)}
+                disabled={bookmarkSubmitting}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                className="btn"
+                onClick={confirmAddBookmark}
+                disabled={bookmarkSubmitting}
+              >
+                {bookmarkSubmitting ? 'Adding...' : 'Yes'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

@@ -48,7 +48,6 @@ function agentLabel(appType, agentId, appId) {
   if (normType === 'KB Question & Answer') return 'KB Question & Answer';
   if (lower === 'kb question & answer') return 'KB Question & Answer';
   if (lower === 'general qa') return 'General QA';
-  if (lower === 'deep research') return 'Deep Research';
   if (upper === 'RAG') return 'KB Question & Answer';
   if (normType) return normType;
   return 'KB Question & Answer';

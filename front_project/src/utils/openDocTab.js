@@ -21,6 +21,7 @@ export function normalizeOpenDocTabDetail(detail = {}) {
     ...detail,
     docId: toNullable(detail.docId),
     objectId: toNullable(detail.objectId),
+    aiDocumentId: toNullableString(detail.aiDocumentId ?? detail.ai_document_id ?? detail.aid),
     page: toNullable(detail.page),
     title: toNullableString(detail.title),
     docTitle: toNullableString(detail.docTitle),

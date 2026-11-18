@@ -93,6 +93,9 @@ export default function SearchDocsModal({
             doc_sub_path: r.storage_object_sub_path ?? r.sub_path ?? null,
             doc_file_right: r.storage_object_file_right ?? r.file_right ?? null,
             doc_branch_type: r.branch_type ?? null,
+            storage_scope: r.storage_scope ?? null,
+            upload_mode: r.upload_mode ?? null,
+            kb_type: r.kb_type ?? null,
             created_at: r.created_at ?? r.createdAt ?? r.created ?? null,
             updated_at: r.updated_at ?? r.updatedAt ?? r.updated ?? null,
           }));
@@ -124,6 +127,9 @@ export default function SearchDocsModal({
             doc_sub_path: r.storage_object_sub_path ?? r.sub_path ?? null,
             doc_file_right: r.storage_object_file_right ?? r.file_right ?? null,
             doc_branch_type: r.branch_type ?? null,
+            storage_scope: r.storage_scope ?? null,
+            upload_mode: r.upload_mode ?? null,
+            kb_type: r.kb_type ?? null,
             created_at: r.created_at ?? r.createdAt ?? r.created ?? null,
             updated_at: r.updated_at ?? r.updatedAt ?? r.updated ?? null,
           }));
@@ -275,6 +281,7 @@ export default function SearchDocsModal({
               <div className="results-table" ref={listRef} tabIndex={-1}>
                 <div className="table-head">
                   <div className="th col-name">Name</div>
+                  <div className="th col-scope">Scope</div>
                   <div className="th col-created">Created at</div>
                   <div className="th col-updated">Updated at</div>
                 </div>
@@ -296,6 +303,7 @@ export default function SearchDocsModal({
                         <div className="td col-name">
                           <span className="name-ellipsis">{row.name}</span>
                         </div>
+                        <div className="td col-scope">{row.storage_scope || '-'}</div>
                         <div className="td col-created">{formatTs(row.created_at)}</div>
                         <div className="td col-updated">{formatTs(row.updated_at)}</div>
                       </button>

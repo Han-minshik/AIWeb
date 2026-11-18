@@ -18,6 +18,11 @@ from jose import jwt, JWTError, ExpiredSignatureError
 from app.utils.db import fetch_one
 from app.core.config import UPLOAD_DIR as CONFIG_UPLOAD_DIR
 from app.core.auth import get_current_user as core_get_current_user
+from app.services.features.document_db import require_object_permission, resolve_storage_path, storage_target_path
+from app.services.common.minio_storage_service import (
+    MinioObjectNotFoundError,
+    get_minio_storage_service,
+)
 
 JWT_SECRET = os.getenv("EMBEDPDF_JWT_SECRET", "change-this-in-prod")
 JWT_ALG = "HS256"
@@ -59,7 +64,7 @@ SYNAP_WATERMARK_TILE_SPACING = int(os.getenv("SYNAP_WATERMARK_TILE_SPACING", "22
 
 UPLOADS_DIR = os.path.abspath(CONFIG_UPLOAD_DIR)
 log = logging.getLogger(__name__)
-print(f"[docs-embed] loaded from {__file__}, UPLOADS_DIR={UPLOADS_DIR}")
+pass  # debug output removed
 
 
 def _now_utc() -> datetime:
@@ -98,6 +103,19 @@ def _safe_join_uploads(filename: str) -> str:
         raise HTTPException(status_code=400, detail="Invalid file id")
 
     filename = unquote(filename)
+
+    if filename.isdigit():
+        row = _storage_row_by_object_id(int(filename))
+        if row:
+            return resolve_storage_path(row)
+
+    try:
+        object_id = _object_id_from_stored_path(filename)
+        row = _storage_row_by_object_id(object_id)
+        if row:
+            return resolve_storage_path(row)
+    except HTTPException:
+        pass
 
     path = os.path.normpath(os.path.join(UPLOADS_DIR, filename))
 
@@ -149,18 +167,33 @@ def _parse_range(range_header: str, file_size: int) -> Optional[Tuple[int, int]]
 
 def _latest_object_id_from_doc_id(doc_id: int) -> int:
     row = fetch_one(
+        "SELECT object_id FROM storage_objects WHERE object_id=%s LIMIT 1",
+        (int(doc_id),),
+    )
+    if not row or not row.get("object_id"):
+        raise HTTPException(status_code=404, detail="Document not found")
+    return int(row["object_id"])
+
+
+def _storage_row_by_object_id(object_id_int: int) -> Optional[dict]:
+    return fetch_one("SELECT * FROM storage_objects WHERE object_id=%s", (int(object_id_int),))
+
+
+def _storage_row_by_ai_document_id(ai_document_id: str) -> Optional[dict]:
+    aid = str(ai_document_id or "").strip()
+    if not aid:
+        return None
+    return fetch_one(
         """
-        SELECT dr.storage_object_id
-          FROM doc_revisions dr
-         WHERE dr.doc_master_id=%s AND dr.deleted_at IS NULL
-         ORDER BY dr.rev_no DESC
+        SELECT so.*
+          FROM ai_document_info ai
+          JOIN storage_objects so ON so.object_id = ai.object_id
+         WHERE ai.ai_document_id=%s
+           AND ai.object_id IS NOT NULL
          LIMIT 1
         """,
-        (doc_id,),
+        (aid,),
     )
-    if not row or not row.get("storage_object_id"):
-        raise HTTPException(status_code=404, detail="Document not found")
-    return int(row["storage_object_id"])
 
 
 def _normalize_rel_prefix(rel: str) -> str:
@@ -175,25 +208,10 @@ def _normalize_rel_prefix(rel: str) -> str:
 
 
 def _stored_filename_from_object_id(object_id_int: int) -> str:
-    row = fetch_one("SELECT name, file_right, relative_path, sub_path FROM storage_objects WHERE object_id=%s", (object_id_int,))
-    if not row or not row.get("name"):
+    row = _storage_row_by_object_id(object_id_int)
+    if not row or not row.get("doc_name"):
         raise HTTPException(status_code=404, detail="Document not found")
-    rel_root = _normalize_rel_prefix((row.get("relative_path") or ""))
-    sub = (row.get("sub_path") or "").strip().replace("\\", "/").strip("/")
-    rel = rel_root
-    if rel_root and sub:
-        rel = f"{rel_root}/{sub}"
-    elif sub and not rel_root:
-        rel = sub
-    name = str(row["name"])
-    file_right = (row.get("file_right") or "").strip().lstrip(".")
-    display = f"{name}.{file_right}" if file_right else name
-    stored = display
-    if rel:
-        if rel.lower() == stored.lower() or rel.lower().endswith("/" + stored.lower()):
-            return rel
-        return f"{rel}/{stored}"
-    return stored
+    return storage_target_path(row)
 
 
 def _ascii_fallback(name: str) -> str:
@@ -286,6 +304,20 @@ def _try_get_current_user_for_watermark(request: Optional[Request]) -> Optional[
     """
     if request is None:
         return None
+
+
+def _require_request_object_permission(
+    request: Optional[Request],
+    object_id: int,
+    permission: str = "r",
+) -> None:
+    if request is None:
+        raise HTTPException(status_code=401, detail="Authentication required")
+    current_user = core_get_current_user(request)
+    user_id = current_user.get("user_id") or current_user.get("id")
+    if user_id is None:
+        raise HTTPException(status_code=401, detail="Authentication required")
+    require_object_permission(int(user_id), int(object_id), permission)
     try:
         return core_get_current_user(request)
     except Exception:
@@ -416,7 +448,7 @@ def _object_id_from_stored_path(stored_path: str) -> int:
 
     rel = parts[0] if len(parts) >= 2 else None
     sub = "/".join(parts[1:-1]) if len(parts) >= 3 else None
-    conds = ["name=%s"]
+    conds = ["doc_name=%s"]
     params: list = [base]
     if ext:
         conds.append("LOWER(file_right)=%s")
@@ -442,7 +474,7 @@ def _object_id_from_stored_path(stored_path: str) -> int:
         return int(row["object_id"])
 
     # Fallback to name/ext-only lookup for legacy rows that do not keep rel/sub consistently.
-    conds = ["name=%s"]
+    conds = ["doc_name=%s"]
     params = [base]
     if ext:
         conds.append("LOWER(file_right)=%s")
@@ -467,9 +499,29 @@ def _object_exists(object_id: int) -> bool:
     return bool(row and row.get("object_id") is not None)
 
 
+def _object_id_from_ai_document_id(ai_document_id: str) -> int:
+    aid = str(ai_document_id or "").strip()
+    if not aid:
+        raise HTTPException(status_code=400, detail="ai_document_id is required")
+    row = fetch_one(
+        """
+        SELECT object_id
+          FROM ai_document_info
+         WHERE ai_document_id=%s
+           AND object_id IS NOT NULL
+         LIMIT 1
+        """,
+        (aid,),
+    )
+    if not row or row.get("object_id") is None:
+        raise HTTPException(status_code=404, detail="Document not found")
+    return int(row["object_id"])
+
+
 def _resolve_object_id_for_synap(
     doc_id: Optional[int],
     object_id: Optional[int],
+    ai_document_id: Optional[str],
     name: Optional[str],
     stored_path: Optional[str],
     relative_path: Optional[str],
@@ -487,6 +539,12 @@ def _resolve_object_id_for_synap(
         oid = int(object_id)
         if _object_exists(oid):
             return oid
+
+    if ai_document_id:
+        try:
+            return _object_id_from_ai_document_id(ai_document_id)
+        except HTTPException:
+            pass
 
     if name_norm and has_path_hint:
         try:
@@ -724,7 +782,7 @@ def _object_id_from_name(
     rel = rel or None
     sub = sub or None
 
-    conds = ["name=%s"]
+    conds = ["doc_name=%s"]
     params: list = [base]
     if fr:
         conds.append("LOWER(file_right)=%s")
@@ -773,6 +831,7 @@ def get_file_meta_by_id(
     request: Request = None,
 ):
     object_id = _latest_object_id_from_doc_id(doc_id)
+    _require_request_object_permission(request, object_id, "r")
     stored_filename = _stored_filename_from_object_id(object_id)
     path = _safe_join_uploads(stored_filename)
     st = _stat_file(path)
@@ -785,10 +844,9 @@ def get_file_meta_by_id(
         can_read=True,
     )
 
-    token, exp = _issue_token(object_id=unquote(stored_filename))
-    encoded = quote(unquote(stored_filename), safe="")
-    meta.signed_url = DOCS_EMBED_PREFIX + f"/{encoded}/stream?token={token}"
-    meta.expires_at = exp.isoformat()
+    signed_url, expires_at = _make_signed_stream_url(object_id)
+    meta.signed_url = signed_url
+    meta.expires_at = expires_at
     return meta
 
 
@@ -798,6 +856,7 @@ def get_file_meta_by_object_id(
     object_id: int = Path(..., ge=1),
     request: Request = None,
 ):
+    _require_request_object_permission(request, object_id, "r")
     stored_filename = _stored_filename_from_object_id(object_id)
     path = _safe_join_uploads(stored_filename)
     st = _stat_file(path)
@@ -810,10 +869,33 @@ def get_file_meta_by_object_id(
         can_read=True,
     )
 
-    token, exp = _issue_token(object_id=unquote(stored_filename))
-    encoded = quote(unquote(stored_filename), safe="")
-    meta.signed_url = DOCS_EMBED_PREFIX + f"/{encoded}/stream?token={token}"
-    meta.expires_at = exp.isoformat()
+    signed_url, expires_at = _make_signed_stream_url(object_id)
+    meta.signed_url = signed_url
+    meta.expires_at = expires_at
+    return meta
+
+
+def get_file_meta_by_ai_document_id(
+    ai_document_id: str = Path(..., min_length=1),
+    request: Request = None,
+):
+    object_id = _object_id_from_ai_document_id(ai_document_id)
+    _require_request_object_permission(request, object_id, "r")
+    stored_filename = _stored_filename_from_object_id(object_id)
+    path = _safe_join_uploads(stored_filename)
+    st = _stat_file(path)
+
+    mime = _guess_mime(stored_filename)
+    meta = FileMeta(
+        name=unquote(stored_filename),
+        mime=mime,
+        size=st.st_size,
+        can_read=True,
+    )
+
+    signed_url, expires_at = _make_signed_stream_url(object_id)
+    meta.signed_url = signed_url
+    meta.expires_at = expires_at
     return meta
 
 
@@ -830,12 +912,13 @@ def get_file_meta_by_name(
         sub_path=sub_path,
         file_right=file_right,
     )
+    _require_request_object_permission(request, object_id, "r")
     stored_filename = _stored_filename_from_object_id(object_id)
     log.info("[docs-embed] by-name lookup name=%s object_id=%s stored=%s", name, object_id, stored_filename)
-    print(f"[docs-embed] by-name lookup file={__file__} name={name} object_id={object_id} stored={stored_filename}")
+    pass  # debug output removed
     path = _safe_join_uploads(stored_filename)
     log.info("[docs-embed] resolved path=%s exists=%s", path, os.path.exists(path))
-    print(f"[docs-embed] resolved path={path} exists={os.path.exists(path)}")
+    pass  # debug output removed
     st = _stat_file(path)
 
     mime = _guess_mime(stored_filename)
@@ -846,10 +929,9 @@ def get_file_meta_by_name(
         can_read=True,
     )
 
-    token, exp = _issue_token(object_id=unquote(stored_filename))
-    encoded = quote(unquote(stored_filename), safe="")
-    meta.signed_url = DOCS_EMBED_PREFIX + f"/{encoded}/stream?token={token}"
-    meta.expires_at = exp.isoformat()
+    signed_url, expires_at = _make_signed_stream_url(object_id)
+    meta.signed_url = signed_url
+    meta.expires_at = expires_at
     return meta
 
 
@@ -857,6 +939,7 @@ def get_synap_job(
     request: Request,
     doc_id: Optional[int] = Query(None, ge=1),
     object_id: Optional[int] = Query(None, ge=1),
+    ai_document_id: Optional[str] = Query(None),
     name: Optional[str] = Query(None),
     stored_path: Optional[str] = Query(None),
     relative_path: Optional[str] = Query(None),
@@ -869,15 +952,19 @@ def get_synap_job(
     oid = _resolve_object_id_for_synap(
         doc_id=doc_id,
         object_id=object_id,
+        ai_document_id=ai_document_id,
         name=name,
         stored_path=stored_path,
         relative_path=relative_path,
         sub_path=sub_path,
         file_right=file_right,
     )
+    _require_request_object_permission(request, oid, "r")
     stored_filename = _stored_filename_from_object_id(oid)
-    path = _safe_join_uploads(stored_filename)
-    _ = _stat_file(path)
+    storage_row = _storage_row_by_object_id(oid)
+    if not storage_row or str(storage_row.get("storage_backend") or "").strip().lower() != "minio":
+        path = _safe_join_uploads(stored_filename)
+        _ = _stat_file(path)
     mime = _guess_mime(stored_filename)
 
     file_url, expires_at = _make_signed_stream_url(oid)
@@ -923,7 +1010,7 @@ def get_synap_job(
     theme_norm = _normalize_theme(theme)
     if theme_norm:
         job_url = _with_query_param(job_url, "theme", theme_norm)
-    print(f"[docs-embed] synap job_url page={page} -> {job_url}")
+    pass  # debug output removed
 
     return SynapJobMeta(
         object_id=oid,
@@ -935,28 +1022,32 @@ def get_synap_job(
     )
 
 
-def renew_signed_url_by_object_id(object_id: int = Path(..., ge=1)):
-    stored_filename = _stored_filename_from_object_id(object_id)
-    token, exp = _issue_token(object_id=unquote(stored_filename))
-    encoded = quote(unquote(stored_filename), safe="")
+def renew_signed_url_by_object_id(object_id: int = Path(..., ge=1), request: Request = None):
+    _require_request_object_permission(request, object_id, "r")
+    signed_url, expires_at = _make_signed_stream_url(object_id)
     return {
-        "signed_url": DOCS_EMBED_PREFIX + f"/{encoded}/stream?token={token}",
-        "expires_at": exp.isoformat(),
+        "signed_url": signed_url,
+        "expires_at": expires_at,
     }
 
-def renew_signed_url_by_id(doc_id: int = Path(..., ge=1)):
+def renew_signed_url_by_id(doc_id: int = Path(..., ge=1), request: Request = None):
     object_id = _latest_object_id_from_doc_id(doc_id)
-    stored_filename = _stored_filename_from_object_id(object_id)
-    token, exp = _issue_token(object_id=unquote(stored_filename))
-    encoded = quote(unquote(stored_filename), safe="")
+    _require_request_object_permission(request, object_id, "r")
+    signed_url, expires_at = _make_signed_stream_url(object_id)
     return {
-        "signed_url": DOCS_EMBED_PREFIX + f"/{encoded}/stream?token={token}",
-        "expires_at": exp.isoformat(),
+        "signed_url": signed_url,
+        "expires_at": expires_at,
     }
 
 
 def renew_signed_url(stored_filename: str, request: Request):
     _ = _safe_join_uploads(stored_filename)
+    try:
+        object_id = _object_id_from_stored_path(stored_filename)
+        _require_request_object_permission(request, object_id, "r")
+    except HTTPException as exc:
+        if exc.status_code != 404:
+            raise
     token, exp = _issue_token(object_id=unquote(stored_filename))
     encoded = quote(unquote(stored_filename), safe="")
     return {
@@ -967,7 +1058,7 @@ def renew_signed_url(stored_filename: str, request: Request):
 
 def _stream_file_from_stored(stored_filename: str, request: Request):
     path = _safe_join_uploads(stored_filename)
-    print(f"[docs-embed] stream path={path} exists={os.path.exists(path)}")
+    pass  # debug output removed
     st = _stat_file(path)
     file_size = st.st_size
     mime = _guess_mime(stored_filename)
@@ -1038,6 +1129,67 @@ def _stream_file_from_stored(stored_filename: str, request: Request):
     return StreamingResponse(file_iter(path), headers=headers)
 
 
+def _stream_minio_object(object_id: int, request: Request):
+    row = _storage_row_by_object_id(int(object_id))
+    if not row:
+        raise HTTPException(status_code=404, detail="Document not found")
+    revision = fetch_one(
+        """
+        SELECT minio_version_id
+          FROM doc_revisions
+         WHERE doc_id=%s AND storage_status='READY' AND minio_version_id IS NOT NULL
+         ORDER BY rev_no DESC,revision_id DESC LIMIT 1
+        """,
+        (int(object_id),),
+    )
+    if not revision:
+        raise HTTPException(status_code=409, detail="DOCUMENT_UPLOAD_NOT_READY")
+    storage = get_minio_storage_service()
+    try:
+        metadata = storage.stat_object(
+            row["bucket_name"], row["object_key"], version_id=revision["minio_version_id"]
+        )
+    except MinioObjectNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="MINIO_DOCUMENT_VERSION_NOT_FOUND") from exc
+    file_size = int(metadata.size_bytes)
+    etag = f'"{metadata.etag or revision["minio_version_id"]}"'
+    if request.headers.get("if-none-match") == etag:
+        return Response(status_code=status.HTTP_304_NOT_MODIFIED)
+    filename = storage_target_path(row)
+    headers = {
+        "Content-Type": row.get("mime_type") or metadata.content_type or "application/octet-stream",
+        "Accept-Ranges": "bytes",
+        "Content-Disposition": _content_disposition_inline(filename),
+        "ETag": etag,
+    }
+    range_header = request.headers.get("range")
+    if range_header and file_size > 0:
+        byte_range = _parse_range(range_header, file_size)
+        if not byte_range:
+            return Response(
+                status_code=status.HTTP_416_REQUESTED_RANGE_NOT_SATISFIABLE,
+                headers={"Content-Range": f"bytes */{file_size}"},
+            )
+        start, end = byte_range
+        length = end - start + 1
+        headers["Content-Length"] = str(length)
+        headers["Content-Range"] = f"bytes {start}-{end}/{file_size}"
+        return StreamingResponse(
+            storage.iter_object(
+                row["bucket_name"], row["object_key"],
+                version_id=revision["minio_version_id"], offset=start, length=length,
+            ),
+            status_code=status.HTTP_206_PARTIAL_CONTENT,
+            headers=headers,
+        )
+    headers["Content-Length"] = str(file_size)
+    return StreamingResponse(
+        storage.iter_object(
+            row["bucket_name"], row["object_key"], version_id=revision["minio_version_id"]
+        ),
+        headers=headers,
+    )
+
 def stream_file_by_object(
     object_id: int = Path(..., ge=1),
     request: Request = None,
@@ -1046,6 +1198,9 @@ def stream_file_by_object(
     claims = _verify_token(token)
     if claims.get("oid") != str(int(object_id)) or claims.get("scp") != "read":
         raise HTTPException(status_code=403, detail="Forbidden")
+    row = _storage_row_by_object_id(int(object_id))
+    if row and str(row.get("storage_backend") or "").lower() == "minio":
+        return _stream_minio_object(int(object_id), request)
     stored_filename = _stored_filename_from_object_id(int(object_id))
     return _stream_file_from_stored(stored_filename, request)
 
@@ -1053,8 +1208,8 @@ def stream_file_by_object(
 def stream_file(stored_filename: str, request: Request, token: str = Query(...)):
     raw_stored = stored_filename
     stored_filename = unquote(stored_filename)
-    print(f"[docs-embed] stream raw={raw_stored}")
-    print(f"[docs-embed] stream unquoted={stored_filename}")
+    pass  # debug output removed
+    pass  # debug output removed
     claims = _verify_token(token)
     if claims.get("oid") != unquote(stored_filename) or claims.get("scp") != "read":
         raise HTTPException(status_code=403, detail="Forbidden")
@@ -1069,15 +1224,18 @@ def get_file_meta(stored_filename: str, request: Request):
         sub = request.query_params.get("sub_path", "") or None
         fr = request.query_params.get("file_right", "") or None
         object_id = _object_id_from_name(name, relative_path=rel, sub_path=sub, file_right=fr)
+        _require_request_object_permission(request, object_id, "r")
         stored_filename = _stored_filename_from_object_id(object_id)
     elif stored_filename.startswith("by-id/"):
         raw = stored_filename.split("/", 1)[-1]
         if raw.isdigit():
             object_id = _latest_object_id_from_doc_id(int(raw))
+            _require_request_object_permission(request, object_id, "r")
             stored_filename = _stored_filename_from_object_id(object_id)
     elif stored_filename.startswith("by-object/"):
         raw = stored_filename.split("/", 1)[-1]
         if raw.isdigit():
+            _require_request_object_permission(request, int(raw), "r")
             stored_filename = _stored_filename_from_object_id(int(raw))
 
     path = _safe_join_uploads(stored_filename)
@@ -1094,9 +1252,16 @@ def get_file_meta(stored_filename: str, request: Request):
     )
 
     if can_read:
-        token, exp = _issue_token(object_id=unquote(stored_filename))
-        encoded = quote(unquote(stored_filename), safe="")
-        meta.signed_url = DOCS_EMBED_PREFIX + f"/{encoded}/stream?token={token}"
-        meta.expires_at = exp.isoformat()
+        try:
+            object_id = _object_id_from_stored_path(stored_filename)
+            _require_request_object_permission(request, object_id, "r")
+            signed_url, expires_at = _make_signed_stream_url(object_id)
+            meta.signed_url = signed_url
+            meta.expires_at = expires_at
+        except HTTPException:
+            token, exp = _issue_token(object_id=unquote(stored_filename))
+            encoded = quote(unquote(stored_filename), safe="")
+            meta.signed_url = DOCS_EMBED_PREFIX + f"/{encoded}/stream?token={token}"
+            meta.expires_at = exp.isoformat()
 
     return meta

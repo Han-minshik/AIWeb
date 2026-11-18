@@ -1,9 +1,9 @@
 from fastapi import Depends, HTTPException, Query
 from pydantic import BaseModel, validator
 from typing import Optional, Literal, Dict, Any, List
+from functools import lru_cache
 from app.deps.auth_dep import get_current_user_id
 from app.repositories.common import fetch_all, fetch_one, execute
-from app.utils.kiwix_itemtype import resolve_kiwix_itemtype_name
 from app.utils.dates import now_str
 from datetime import datetime
 import json
@@ -17,14 +17,44 @@ def _coerce_int(v, default=None):
         return default
 
 
-def _app_type_to_app_id_static(app_type: Optional[str]) -> Optional[int]:
-    if not app_type:
-        return None
-    u = str(app_type).strip().lower()
-    if u == "rag":
-        return None
-    table = {"req1": 1, "req2": 2, "req3": 3, "req4": 4, "req5": 5, "req8": 8}
-    return table.get(u)
+def _is_rag_app_type(app_type: Optional[str]) -> bool:
+    return str(app_type or "").strip().lower() == "rag"
+
+
+@lru_cache(maxsize=16)
+def _table_has_org_id(table_name: str) -> bool:
+    row = fetch_one(
+        """
+        SELECT 1 AS ok
+        FROM INFORMATION_SCHEMA.COLUMNS
+        WHERE TABLE_SCHEMA = current_schema()
+          AND TABLE_NAME = %s
+          AND COLUMN_NAME = 'org_id'
+        LIMIT 1
+        """,
+        (table_name,),
+    )
+    return bool(row)
+
+
+def _resolve_session_kb(raw_kb_id: Any, raw_kb_name: Any) -> tuple[Optional[int], Optional[str]]:
+    kb_id = _coerce_int(raw_kb_id, None)
+    kb_name = str(raw_kb_name).strip() if raw_kb_name not in (None, "") else None
+    if kb_id is None:
+        return None, kb_name
+
+    row = fetch_one(
+        """
+        SELECT node_id, alias, name
+        FROM tree_nodes
+        WHERE node_id=%s AND is_folder=TRUE
+        LIMIT 1
+        """,
+        (kb_id,),
+    )
+    if not row:
+        raise HTTPException(status_code=400, detail="Selected KB does not exist.")
+    return int(row["node_id"]), kb_name or row.get("alias") or row.get("name")
 
 
 def _parse_dt(s: Optional[str]) -> Optional[str]:
@@ -51,7 +81,6 @@ def _normalize_date_range(start_date: Optional[str], end_date: Optional[str]):
 
 
 class SessionCreateIn(BaseModel):
-    org_id: Optional[int] = None
     app_id: Optional[int] = None
     summary: Optional[str] = None
     title: Optional[str] = None
@@ -59,101 +88,92 @@ class SessionCreateIn(BaseModel):
 
     @validator("summary", always=True)
     def _fill_summary(cls, v, values):
-        return v or values.get("title") or "Q&A 세션"
-
-    @validator("org_id", pre=True, always=True)
-    def _fill_org_id(cls, v):
-        return _coerce_int(v, 1)
+        return v or values.get("title") or "Q&A Session"
 
     @validator("app_id", always=True)
-    def _fill_app_id(cls, v, values):
-        if v is not None:
-            return v
-        mapped = _app_type_to_app_id_static(values.get("app_type"))
-        return mapped
+    def _fill_app_id(cls, v):
+        return _coerce_int(v, None)
     
-class SessionFeedbackIn(BaseModel):
-    rating: int
-    comment: Optional[str] = None
-
-    @validator("rating")
-    def _validate_rating(cls, v):
-        if v < 1 or v > 5:
-            raise ValueError("rating must be between 1 and 5")
-        return v
-
 def create_session(data: SessionCreateIn, user_id: int = Depends(get_current_user_id)):
     now = now_str()
-    summary = (data.summary or "Q&A 세션")
+    summary = (data.summary or "Q&A Session")
+    has_apps_org = _table_has_org_id("chat_apps")
+    has_sessions_org = _table_has_org_id("chat_sessions")
 
     if data.app_id is None and data.app_type:
-        # Persist selected agent by mapping app_type -> chat_apps.app_id.
-        # Use case-insensitive match against both name and display_name.
         norm = str(data.app_type).strip()
-        at = norm.lower()
-        if at != "rag":
+        if not _is_rag_app_type(norm):
             row_app = fetch_one(
                 """
-                SELECT app_id, name, display_name
+                SELECT app_id
                 FROM chat_apps
-                WHERE org_id=%s
-                  AND (
+                WHERE (
                     LOWER(name) = LOWER(%s)
                     OR (display_name IS NOT NULL AND LOWER(display_name) = LOWER(%s))
                   )
+                {org_filter}
                 LIMIT 1
-                """,
-                (int(data.org_id), norm, norm),
+                """.replace("{org_filter}", " AND org_id=%s" if has_apps_org else ""),
+                (norm, norm, 1) if has_apps_org else (norm, norm),
             )
             if row_app and row_app.get("app_id") is not None:
-                data.app_id = row_app["app_id"]
+                data.app_id = int(row_app["app_id"])
 
-    execute(
-        """
-        INSERT INTO chat_sessions (org_id, user_id, app_id, first_question_summary, created_at, last_activity_at)
-        VALUES (%s, %s, %s, %s, %s, %s)
-        """,
-        (data.org_id, user_id, data.app_id, summary, now, now),
-    )
-
-    row = fetch_one("SELECT LAST_INSERT_ID() AS session_id")
-    sid = (row["session_id"] if row else None)
+    if has_sessions_org:
+        sid = execute(
+            """
+            INSERT INTO chat_sessions (org_id, user_id, app_id, first_question_summary, created_at, last_activity_at)
+            VALUES (%s, %s, %s, %s, %s, %s)
+            """,
+            (1, user_id, data.app_id, summary, now, now),
+            True,
+        )
+    else:
+        sid = execute(
+            """
+            INSERT INTO chat_sessions (user_id, app_id, first_question_summary, created_at, last_activity_at)
+            VALUES (%s, %s, %s, %s, %s)
+            """,
+            (user_id, data.app_id, summary, now, now),
+            True,
+        )
 
     if not sid or (isinstance(sid, (str, int)) and int(sid) == 0):
         if data.app_id is None:
             q = """
                 SELECT session_id
                 FROM chat_sessions
-                WHERE org_id = %s
-                  AND user_id = %s
+                WHERE user_id = %s
+                  {org_filter}
                   AND app_id IS NULL
                   AND first_question_summary = %s
                   AND created_at = %s
                 ORDER BY session_id DESC
                 LIMIT 1
-            """
-            row2 = fetch_one(q, (int(data.org_id), int(user_id), summary, now))
+            """.replace("{org_filter}", "AND org_id = %s" if has_sessions_org else "")
+            row2 = fetch_one(q, (int(user_id), 1, summary, now) if has_sessions_org else (int(user_id), summary, now))
         else:
             q = """
                 SELECT session_id
                 FROM chat_sessions
-                WHERE org_id = %s
-                  AND user_id = %s
+                WHERE user_id = %s
+                  {org_filter}
                   AND app_id = %s
                   AND first_question_summary = %s
                   AND created_at = %s
                 ORDER BY session_id DESC
                 LIMIT 1
-            """
+            """.replace("{org_filter}", "AND org_id = %s" if has_sessions_org else "")
             row2 = fetch_one(
                 q,
-                (int(data.org_id), int(user_id), int(data.app_id), summary, now),
+                (int(user_id), 1, int(data.app_id), summary, now)
+                if has_sessions_org
+                else (int(user_id), int(data.app_id), summary, now),
             )
         sid = (row2["session_id"] if row2 else None)
 
     return {
         "session_id": int(sid) if sid is not None else None,
-        "org_id": data.org_id,
         "user_id": user_id,
         "app_id": data.app_id,
         "app_type": (
@@ -165,14 +185,11 @@ def create_session(data: SessionCreateIn, user_id: int = Depends(get_current_use
         "created_at": now,
         "last_activity_at": now,
     }
-
-
 def list_sessions(user_id: int = Depends(get_current_user_id)) -> List[Dict[str, Any]]:
     return fetch_all(
         """
         SELECT
           s.session_id,
-          s.org_id,
           s.user_id,
           s.app_id,
           COALESCE(ca.name, 'RAG') AS app_type,
@@ -180,7 +197,8 @@ def list_sessions(user_id: int = Depends(get_current_user_id)) -> List[Dict[str,
           s.created_at,
           s.last_activity_at,
           s.selected_kb_id AS kb_id,
-          s.selected_kb_name AS kb_name,
+          s.selected_kb_id,
+          COALESCE(s.selected_kb_name, sk.alias, sk.name) AS kb_name,
           s.selected_doc_ids,
           (
             SELECT cm.content
@@ -198,6 +216,7 @@ def list_sessions(user_id: int = Depends(get_current_user_id)) -> List[Dict[str,
           ) AS last_message
         FROM chat_sessions s
         LEFT JOIN chat_apps ca ON ca.app_id = s.app_id
+        LEFT JOIN tree_nodes sk ON sk.node_id = s.selected_kb_id
         WHERE s.user_id=%s
         ORDER BY s.last_activity_at DESC
         """,
@@ -209,15 +228,18 @@ def get_session(session_id: int, user_id: int = Depends(get_current_user_id)):
     row = fetch_one(
         """
         SELECT s.*,
+               s.selected_kb_id AS kb_id,
+               COALESCE(s.selected_kb_name, sk.alias, sk.name) AS kb_name,
                COALESCE(ca.name, 'RAG') AS app_type
         FROM chat_sessions s
         LEFT JOIN chat_apps ca ON ca.app_id = s.app_id
+        LEFT JOIN tree_nodes sk ON sk.node_id = s.selected_kb_id
         WHERE s.session_id=%s AND s.user_id=%s
         """,
         (session_id, user_id),
     )
     if not row:
-        raise HTTPException(status_code=404, detail="세션을 찾을 수 없습니다.")
+        raise HTTPException(status_code=404, detail="Session not found.")
     return row
 
 def delete_session(session_id: int, user_id: int = Depends(get_current_user_id)):
@@ -226,23 +248,18 @@ def delete_session(session_id: int, user_id: int = Depends(get_current_user_id))
         (session_id, user_id),
     )
     if not owned:
-        raise HTTPException(status_code=403, detail="권한 없음")
+        raise HTTPException(status_code=403, detail="Permission denied.")
     execute(
         """
-        DELETE f
-        FROM chat_feedback f
-        JOIN chat_messages m ON m.message_id = f.msg_id
-        WHERE m.session_id = %s
+        DELETE FROM chat_feedback f
+        USING chat_messages m
+        WHERE m.message_id = f.msg_id AND m.session_id = %s
         """,
-        (session_id,),
-    )
-    execute(
-        "DELETE FROM chat_feedbacks WHERE session_id = %s",
         (session_id,),
     )
     execute("DELETE FROM chat_messages WHERE session_id=%s", (session_id,))
     execute("DELETE FROM chat_sessions WHERE session_id=%s", (session_id,))
-    return {"message": "सेशन 삭제 완료"}
+    return {"message": "Session deleted successfully."}
 
 
 class MessageIn(BaseModel):
@@ -258,29 +275,26 @@ def add_message(
         (session_id, user_id),
     )
     if not owned:
-        raise HTTPException(status_code=403, detail="권한 없음")
+        raise HTTPException(status_code=403, detail="Permission denied.")
 
     role_upper = data.role.upper()
 
     meta = data.meta or {}
     sources_in = meta.get("sources") or []
     images_in = meta.get("images") or []
-    kb_id = meta.get("kb_id")
-    kb_name = meta.get("kb_name")
+    kb_id, kb_name = _resolve_session_kb(meta.get("kb_id"), meta.get("kb_name"))
     selected_doc_ids = meta.get("selected_doc_ids")
 
-    has_image = 1 if (isinstance(images_in, list) and len(images_in) > 0) else 0
+    has_image = bool(isinstance(images_in, list) and len(images_in) > 0)
 
-    execute(
+    mid = execute(
         """
         INSERT INTO chat_messages (session_id, role, content, has_image, created_at)
         VALUES (%s, %s, %s, %s, NOW())
         """,
         (session_id, role_upper, data.content, has_image),
+        True,
     )
-
-    row = fetch_one("SELECT LAST_INSERT_ID() AS message_id")
-    mid = row["message_id"] if row else None
 
     if not mid or int(mid) == 0:
         row2 = fetch_one(
@@ -304,13 +318,6 @@ def add_message(
     if mid:
         for src in (sources_in if isinstance(sources_in, list) else []):
             if isinstance(src, dict):
-                title = src.get("title")
-                url = (
-                    src.get("url")
-                    or src.get("link")
-                    or src.get("href")
-                    or src.get("path")
-                )
                 object_id = (
                     src.get("id") or src.get("object_id") or src.get("doc_id")
                 )
@@ -319,9 +326,7 @@ def add_message(
                 doc_path = meta_obj.get("file_url") or src.get("file_url")
                 meta_json = _json(src)
             else:
-                title, url, object_id, doc_name, doc_path, meta_json = (
-                    None,
-                    None,
+                object_id, doc_name, doc_path, meta_json = (
                     None,
                     None,
                     None,
@@ -330,35 +335,32 @@ def add_message(
             execute(
                 """
                 INSERT INTO chat_message_sources
-                    (message_id, kind, title, url, object_id, storage_object_id, doc_name, doc_path, meta)
-                VALUES (%s, 'CITATION', %s, %s, %s, NULL, %s, %s, %s)
+                    (message_id, kind, object_id, doc_name, doc_path, meta)
+                VALUES (%s, 'CITATION', %s, %s, %s, %s)
                 """,
-                (mid, title, url, object_id, doc_name, doc_path, meta_json),
+                (mid, object_id, doc_name, doc_path, meta_json),
             )
 
         for img in (images_in if isinstance(images_in, list) else []):
             if isinstance(img, dict):
-                url = (
-                    img.get("url")
-                    or img.get("src")
-                    or img.get("href")
-                    or img.get("path")
+                object_id = (
+                    img.get("object_id")
+                    or img.get("storage_object_id")
+                    or img.get("id")
                 )
-                storage_object_id = img.get("storage_object_id")
                 meta_json = _json(img)
             else:
-                url, storage_object_id, meta_json = (
-                    str(img),
+                object_id, meta_json = (
                     None,
                     _json({"url": str(img)}),
                 )
             execute(
                 """
                 INSERT INTO chat_message_sources
-                    (message_id, kind, title, url, object_id, storage_object_id, doc_name, doc_path, meta)
-                VALUES (%s, 'IMAGE', NULL, %s, NULL, %s, NULL, NULL, %s)
+                    (message_id, kind, object_id, doc_name, doc_path, meta)
+                VALUES (%s, 'IMAGE', %s, NULL, NULL, %s)
                 """,
-                (mid, url, storage_object_id, meta_json),
+                (mid, object_id, meta_json),
             )
 
     if kb_id is not None or kb_name is not None or selected_doc_ids is not None:
@@ -403,7 +405,7 @@ def list_messages(session_id: int, user_id: int = Depends(get_current_user_id)):
         (session_id, user_id),
     )
     if not owned:
-        raise HTTPException(status_code=403, detail="권한 없음")
+        raise HTTPException(status_code=403, detail="Permission denied.")
 
     rows = fetch_all(
         """
@@ -422,7 +424,7 @@ def list_messages(session_id: int, user_id: int = Depends(get_current_user_id)):
     placeholders = ",".join(["%s"] * len(msg_ids))
     src_rows = fetch_all(
         f"""
-        SELECT source_id, message_id, kind, title, url, object_id, storage_object_id, meta
+        SELECT source_id, message_id, kind, object_id, meta
         FROM chat_message_sources
         WHERE message_id IN ({placeholders})
         ORDER BY source_id ASC
@@ -476,14 +478,7 @@ def list_messages(session_id: int, user_id: int = Depends(get_current_user_id)):
         branch_type = str(row.get("branch_type") or "GENERAL").strip().upper() or "GENERAL"
         doc_title = _build_display_name(row.get("name"), file_right)
         stored_path = _join_rel_sub(rel, sub, doc_title)
-        itemtype_name: Optional[str] = None
-        if branch_type == "KIWIX":
-            itemtype_name = resolve_kiwix_itemtype_name(
-                doc_code,
-                sub,
-                row.get("name"),
-                file_right,
-            )
+        itemtype_name = sub.split("/", 1)[0] if branch_type == "KIWIX" and sub else None
         return {
             "object_id": object_id,
             "storage_object_id": object_id,
@@ -498,49 +493,31 @@ def list_messages(session_id: int, user_id: int = Depends(get_current_user_id)):
         }
 
     def _get_doc_meta(doc_master_id: int) -> Optional[Dict[str, Any]]:
-        dm = _coerce_int(doc_master_id)
-        if dm is None:
+        oid = _coerce_int(doc_master_id)
+        if oid is None:
             return None
-        if dm in doc_meta_cache:
-            return doc_meta_cache[dm]
+        if oid in doc_meta_cache:
+            return doc_meta_cache[oid]
         row = fetch_one(
             """
             SELECT
-                r.storage_object_id AS object_id,
+                so.object_id,
                 so.doc_code,
-                so.name,
+                so.doc_name AS name,
                 so.file_right,
                 so.relative_path,
                 so.sub_path,
-                (
-                    SELECT
-                        CASE
-                            WHEN MAX(
-                                CASE
-                                    WHEN UPPER(COALESCE(n.branch_type, 'GENERAL'))='KIWIX' THEN 1
-                                    ELSE 0
-                                END
-                            ) = 1 THEN 'KIWIX'
-                            ELSE 'GENERAL'
-                        END
-                    FROM pf_node_props p2
-                    JOIN tree_nodes n ON n.node_id = p2.node_id
-                    WHERE p2.doc_master_id = r.doc_master_id
-                ) AS branch_type
-            FROM doc_revisions r
-            JOIN storage_objects so ON so.object_id = r.storage_object_id
-            WHERE r.doc_master_id=%s AND r.deleted_at IS NULL
-            ORDER BY r.rev_no DESC
+                UPPER(COALESCE(so.branch_type, 'general')) AS branch_type
+            FROM storage_objects so
+            WHERE so.object_id=%s
             LIMIT 1
             """,
-            (dm,),
+            (oid,),
         )
         meta_row = _meta_from_row(row)
-        doc_meta_cache[dm] = meta_row
+        doc_meta_cache[oid] = meta_row
         if isinstance(meta_row, dict):
-            oid = _coerce_int(meta_row.get("object_id"))
-            if oid is not None:
-                object_meta_cache[oid] = meta_row
+            object_meta_cache[oid] = meta_row
         return meta_row
 
     def _get_object_meta(object_id: Any) -> Optional[Dict[str, Any]]:
@@ -554,29 +531,13 @@ def list_messages(session_id: int, user_id: int = Depends(get_current_user_id)):
             SELECT
                 so.object_id,
                 so.doc_code,
-                so.name,
+                so.doc_name AS name,
                 so.file_right,
                 so.relative_path,
                 so.sub_path,
-                CASE
-                    WHEN MAX(
-                        CASE
-                            WHEN UPPER(COALESCE(n.branch_type, 'GENERAL'))='KIWIX' THEN 1
-                            ELSE 0
-                        END
-                    ) = 1 THEN 'KIWIX'
-                    ELSE 'GENERAL'
-                END AS branch_type
+                UPPER(COALESCE(so.branch_type, 'general')) AS branch_type
             FROM storage_objects so
-            LEFT JOIN doc_revisions r
-                   ON r.storage_object_id = so.object_id
-                  AND r.deleted_at IS NULL
-            LEFT JOIN pf_node_props p
-                   ON p.doc_master_id = r.doc_master_id
-            LEFT JOIN tree_nodes n
-                   ON n.node_id = p.node_id
             WHERE so.object_id=%s
-            GROUP BY so.object_id, so.doc_code, so.name, so.file_right, so.relative_path, so.sub_path
             LIMIT 1
             """,
             (oid,),
@@ -597,6 +558,7 @@ def list_messages(session_id: int, user_id: int = Depends(get_current_user_id)):
                     meta_obj.get("id"),
                     meta_obj.get("object_id"),
                     meta_obj.get("objectId"),
+                    # Backward compatibility for legacy metadata payloads.
                     meta_obj.get("storage_object_id"),
                     meta_obj.get("storageObjectId"),
                 ]
@@ -604,7 +566,6 @@ def list_messages(session_id: int, user_id: int = Depends(get_current_user_id)):
         candidates.extend(
             [
                 src_row.get("object_id"),
-                src_row.get("storage_object_id"),
             ]
         )
 
@@ -615,32 +576,11 @@ def list_messages(session_id: int, user_id: int = Depends(get_current_user_id)):
 
             exists = doc_id_exists_cache.get(n)
             if exists is None:
-                row_exists = fetch_one(
-                    "SELECT doc_master_id FROM doc_master WHERE doc_master_id=%s LIMIT 1",
-                    (n,),
-                )
+                row_exists = fetch_one("SELECT object_id FROM storage_objects WHERE object_id=%s LIMIT 1", (n,))
                 exists = bool(row_exists)
                 doc_id_exists_cache[n] = exists
             if exists:
                 return n
-
-            if n not in storage_to_doc_cache:
-                row_doc = fetch_one(
-                    """
-                    SELECT doc_master_id
-                    FROM doc_revisions
-                    WHERE storage_object_id=%s AND deleted_at IS NULL
-                    ORDER BY rev_no DESC
-                    LIMIT 1
-                    """,
-                    (n,),
-                )
-                if row_doc and row_doc.get("doc_master_id") is not None:
-                    storage_to_doc_cache[n] = int(row_doc["doc_master_id"])
-                else:
-                    storage_to_doc_cache[n] = None
-            if storage_to_doc_cache.get(n) is not None:
-                return storage_to_doc_cache[n]
         return None
 
     def _node_full_path(node_id: int) -> str:
@@ -673,10 +613,7 @@ def list_messages(session_id: int, user_id: int = Depends(get_current_user_id)):
         if cached is not None:
             return cached
 
-        node_rows = fetch_all(
-            "SELECT node_id FROM pf_node_props WHERE doc_master_id=%s ORDER BY node_id ASC",
-            (doc_master_id,),
-        )
+        node_rows = fetch_all("SELECT node_id FROM tree_nodes WHERE doc_id=%s ORDER BY node_id ASC", (doc_master_id,))
         out: List[str] = []
         seen: set[str] = set()
         for nr in (node_rows or []):
@@ -689,6 +626,18 @@ def list_messages(session_id: int, user_id: int = Depends(get_current_user_id)):
                 out.append(p)
         doc_to_paths_cache[doc_master_id] = out
         return out
+
+    def _pick_source_url(meta_obj: Any) -> Optional[str]:
+        if not isinstance(meta_obj, dict):
+            return None
+        for key in ("url", "link", "href", "file_url", "path", "doc_path", "stored_path"):
+            val = meta_obj.get(key)
+            if val is None:
+                continue
+            txt = str(val).strip()
+            if txt:
+                return txt
+        return None
 
     for s in (src_rows or []):
         mid = int(s["message_id"])
@@ -719,7 +668,6 @@ def list_messages(session_id: int, user_id: int = Depends(get_current_user_id)):
             if source_hint is None:
                 raw_source_oid = _coerce_int(
                     s.get("object_id")
-                    or s.get("storage_object_id")
                 )
                 if raw_source_oid is None and isinstance(meta_out, dict):
                     raw_source_oid = _coerce_int(
@@ -755,17 +703,25 @@ def list_messages(session_id: int, user_id: int = Depends(get_current_user_id)):
                 )
             mapping[mid]["sources"].append(
                 {
-                    "title": s.get("title") or meta_title,
-                    "url": s.get("url"),
+                    "title": meta_title,
+                    "url": _pick_source_url(meta_out),
                     "id": source_id,
                     "meta": meta_out,
                 }
             )
         elif kind == "IMAGE":
+            image_object_id = s.get("object_id")
+            if image_object_id is None and isinstance(meta_out, dict):
+                image_object_id = (
+                    meta_out.get("object_id")
+                    or meta_out.get("storage_object_id")
+                    or meta_out.get("id")
+                )
             mapping[mid]["images"].append(
                 {
-                    "url": s.get("url"),
-                    "storage_object_id": s.get("storage_object_id"),
+                    "url": _pick_source_url(meta_out),
+                    # Keep response compatibility while source column is unified.
+                    "storage_object_id": image_object_id,
                     "meta": meta_out,
                 }
             )
@@ -827,7 +783,7 @@ def add_feedback(data: FeedbackIn, user_id: int = Depends(get_current_user_id)):
     )
     if not row:
         raise HTTPException(
-            status_code=403, detail="권한 없음 또는 메시지를 찾을 수 없습니다."
+            status_code=403, detail="Permission denied or session/message not found."
         )
 
     like_cnt = 1 if data.feedback_type == "like" else 0
@@ -837,10 +793,10 @@ def add_feedback(data: FeedbackIn, user_id: int = Depends(get_current_user_id)):
         """
         INSERT INTO chat_feedback (msg_id, user_id, like_count, dislike_count, comment)
         VALUES (%s, %s, %s, %s, %s)
-        ON DUPLICATE KEY UPDATE
-          like_count=VALUES(like_count),
-          dislike_count=VALUES(dislike_count),
-          comment=VALUES(comment)
+        ON CONFLICT (msg_id, user_id) DO UPDATE SET
+          like_count=EXCLUDED.like_count,
+          dislike_count=EXCLUDED.dislike_count,
+          comment=EXCLUDED.comment
         """,
         (data.chat_message_id, user_id, like_cnt, dislike_cnt, data.comment or None),
     )
@@ -849,13 +805,13 @@ def add_feedback(data: FeedbackIn, user_id: int = Depends(get_current_user_id)):
 
 def list_feedback(
     start_date: Optional[str] = Query(
-        default=None, description="시작 날짜 (YYYY-MM-DD 또는 YYYY-MM-DD HH:MM:SS)"
+        default=None, description="Start date (YYYY-MM-DD or YYYY-MM-DD HH:MM:SS)"
     ),
     end_date: Optional[str] = Query(
-        default=None, description="끝 날짜 (YYYY-MM-DD 또는 YYYY-MM-DD HH:MM:SS)"
+        default=None, description="End date (YYYY-MM-DD or YYYY-MM-DD HH:MM:SS)"
     ),
     app_type: Optional[str] = Query(
-        default=None, description="앱 타입(req1, req2, req3, req4, req5, req8, rag)"
+        default=None, description="App type filter (e.g. KB Question & Answer, General QA, rag)"
     ),
     user_id: int = Depends(get_current_user_id),
 ):
@@ -871,14 +827,17 @@ def list_feedback(
         params.append(end_dt)
 
     if app_type:
-        at = str(app_type).strip().lower()
-        if at == "rag":
+        norm = str(app_type).strip()
+        if _is_rag_app_type(norm):
             conditions.append("s.app_id IS NULL")
         else:
-            mapped = _app_type_to_app_id_static(at)
-            if mapped is not None:
-                conditions.append("s.app_id = %s")
-                params.append(mapped)
+            conditions.append(
+                """(
+                    LOWER(ca.name) = LOWER(%s)
+                    OR (ca.display_name IS NOT NULL AND LOWER(ca.display_name) = LOWER(%s))
+                )"""
+            )
+            params.extend([norm, norm])
 
     where_sql = " AND ".join(conditions)
 
@@ -894,7 +853,6 @@ def list_feedback(
           END AS rating,
           f.comment,
           f.created_at,
-          s.org_id,
           s.app_id,
           COALESCE(ca.name, 'RAG') AS app_type,
           s.first_question_summary AS session_summary
@@ -910,45 +868,47 @@ def list_feedback(
 
 def feedback_stats(
     start_date: Optional[str] = Query(
-        default=None, description="시작 날짜 (YYYY-MM-DD 또는 YYYY-MM-DD HH:MM:SS)"
+        default=None, description="Start date (YYYY-MM-DD or YYYY-MM-DD HH:MM:SS)"
     ),
     end_date: Optional[str] = Query(
-        default=None, description="끝 날짜 (YYYY-MM-DD 또는 YYYY-MM-DD HH:MM:SS)"
+        default=None, description="End date (YYYY-MM-DD or YYYY-MM-DD HH:MM:SS)"
     ),
     group_by: Literal["day", "week", "month"] = Query(
-        default="month", description="집계 단위: day, week, month"
+        default="month", description="Group by period: day, week, month"
     ),
     app_type: Optional[str] = Query(
-        default=None, description="앱 타입(req1, req2, req3, req4, req5, req8, rag)"
+        default=None, description="App type filter (e.g. KB Question & Answer, General QA, rag)"
     ),
     user_id: int = Depends(get_current_user_id),
 ):
     start_dt, end_dt = _normalize_date_range(start_date, end_date)
     if not start_dt or not end_dt:
-        raise HTTPException(status_code=400, detail="start_date와 end_date가 필요합니다.")
+        raise HTTPException(status_code=400, detail="start_date and end_date are required.")
 
     if group_by == "day":
-        label_expr = "DATE_FORMAT(f.created_at, '%%Y-%%m-%%d')"
+        label_expr = "TO_CHAR(f.created_at, 'YYYY-MM-DD')"
     elif group_by == "week":
         label_expr = (
-            "DATE_FORMAT(DATE_SUB(f.created_at, INTERVAL (WEEKDAY(f.created_at)) DAY),"
-            " '%%Y-%%m-%%d')"
+            "TO_CHAR(DATE_TRUNC('week', f.created_at), 'YYYY-MM-DD')"
         )
     else:
-        label_expr = "DATE_FORMAT(f.created_at, '%%Y-%%m-01')"
+        label_expr = "TO_CHAR(DATE_TRUNC('month', f.created_at), 'YYYY-MM-DD')"
 
     conditions = ["f.created_at >= %s", "f.created_at <= %s"]
     params: List[Any] = [start_dt, end_dt]
 
     if app_type:
-        at = str(app_type).strip().lower()
-        if at == "rag":
+        norm = str(app_type).strip()
+        if _is_rag_app_type(norm):
             conditions.append("s.app_id IS NULL")
         else:
-            mapped = _app_type_to_app_id_static(at)
-            if mapped is not None:
-                conditions.append("s.app_id = %s")
-                params.append(mapped)
+            conditions.append(
+                """(
+                    LOWER(ca.name) = LOWER(%s)
+                    OR (ca.display_name IS NOT NULL AND LOWER(ca.display_name) = LOWER(%s))
+                )"""
+            )
+            params.extend([norm, norm])
 
     where_sql = " AND ".join(conditions)
 
@@ -961,6 +921,7 @@ def feedback_stats(
         FROM chat_feedback f
         JOIN chat_messages m ON m.message_id = f.msg_id
         JOIN chat_sessions s ON s.session_id = m.session_id
+        LEFT JOIN chat_apps ca ON ca.app_id = s.app_id
         WHERE {where_sql}
         GROUP BY label
         ORDER BY label ASC
@@ -970,38 +931,34 @@ def feedback_stats(
 
 def search_messages(
     q: Optional[str] = Query(
-        default=None, description="메시지 본문 검색 키워드(부분일치)"
+        default=None, description="Message content keyword (partial match)"
     ),
     session_id: Optional[int] = Query(
-        default=None, description="특정 세션으로 필터링"
+        default=None, description="Filter by session ID"
     ),
     role: Optional[Literal["user", "assistant", "system"]] = Query(
-        default=None, description="메시지 역할"
+        default=None, description="Message role"
     ),
     app_type: Optional[str] = Query(
-        default=None, description="앱 타입(req1, req2, req3, req4, req5, req8, rag)"
+        default=None, description="App type filter (e.g. KB Question & Answer, General QA, rag)"
     ),
-    app_id: Optional[int] = Query(default=None, description="특정 앱 ID로 필터링"),
+    app_id: Optional[int] = Query(default=None, description="Filter by app ID"),
     after: Optional[str] = Query(
         default=None,
-        description="이 날짜/시각 이후 (YYYY-MM-DD 또는 YYYY-MM-DD HH:MM:SS)",
+        description="Created after (YYYY-MM-DD or YYYY-MM-DD HH:MM:SS)",
     ),
     before: Optional[str] = Query(
         default=None,
-        description="이 날짜/시각 이전 (YYYY-MM-DD 또는 YYYY-MM-DD HH:MM:SS)",
+        description="Created before (YYYY-MM-DD or YYYY-MM-DD HH:MM:SS)",
     ),
     order: Optional[Literal["asc", "desc"]] = Query(
-        default="desc", description="메시지 시간 정렬"
+        default="desc", description="Sort by creation time"
     ),
-    limit: int = Query(default=50, ge=1, le=200, description="페이지 크기(1~200)"),
-    offset: int = Query(default=0, ge=0, description="페이지 시작 위치(0-base)"),
+    limit: int = Query(default=50, ge=1, le=200, description="Page size (1-200)"),
+    offset: int = Query(default=0, ge=0, description="Page offset (0-based)"),
     user_id: int = Depends(get_current_user_id),
 ):
     resolved_app_id = app_id
-    if resolved_app_id is None and app_type:
-        mapped = _app_type_to_app_id_static(app_type)
-        if mapped is not None:
-            resolved_app_id = mapped
 
     conditions = ["s.user_id = %s"]
     params = [user_id]
@@ -1018,8 +975,18 @@ def search_messages(
         conditions.append("m.role = %s")
         params.append(role.upper())
 
-    if app_type and str(app_type).strip().lower() == "rag":
-        conditions.append("s.app_id IS NULL")
+    if app_type:
+        norm = str(app_type).strip()
+        if _is_rag_app_type(norm):
+            conditions.append("s.app_id IS NULL")
+        else:
+            conditions.append(
+                """(
+                    LOWER(ca.name) = LOWER(%s)
+                    OR (ca.display_name IS NOT NULL AND LOWER(ca.display_name) = LOWER(%s))
+                )"""
+            )
+            params.extend([norm, norm])
     elif resolved_app_id is not None:
         conditions.append("s.app_id = %s")
         params.append(int(resolved_app_id))
@@ -1053,7 +1020,6 @@ def search_messages(
             m.role,
             m.content,
             m.created_at,
-            s.org_id,
             s.user_id,
             s.app_id,
             COALESCE(ca.name, 'RAG') AS app_type,
@@ -1073,32 +1039,3 @@ def search_messages(
         "offset": offset,
         "items": rows,
     }
-
-def create_session_feedback(
-    session_id: int,
-    data: SessionFeedbackIn,
-    user_id: int = Depends(get_current_user_id)
-):
-    row = fetch_one(
-        """
-        SELECT session_id
-        FROM chat_sessions
-        WHERE session_id = %s AND user_id = %s
-        """,
-        (session_id, user_id),
-    )
-    if not row:
-        raise HTTPException(status_code=403, detail="권한 없음 또는 세션을 찾을 수 없습니다.")
-
-    execute(
-        """
-        INSERT INTO chat_feedbacks (session_id, user_id, rating, comment, created_at)
-        VALUES (%s, %s, %s, %s, NOW())
-        ON DUPLICATE KEY UPDATE
-          rating = VALUES(rating),
-          comment = VALUES(comment)
-        """,
-        (session_id, user_id, data.rating, data.comment),
-    )
-
-    return {"ok": True, "session_id": session_id}

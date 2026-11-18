@@ -71,7 +71,6 @@ export default function UserAccessLogModal({ open, onClose, user }) {
                   <th>Time</th>
                   <th>IP</th>
                   <th>Action</th>
-                  <th>Target</th>
                   <th>Root</th>
                   <th>Environment</th>
                 </tr>
@@ -82,7 +81,6 @@ export default function UserAccessLogModal({ open, onClose, user }) {
                     <td>{String(l.created_at || '').replace('T',' ').slice(0,19)}</td>
                     <td>{l.ip_addr}</td>
                     <td>{l.action}</td>
-                    <td>{[l.target_type, l.target_pk].filter(Boolean).join('#')}</td>
                     <td>{l.path || l.detail || ''}</td>
                     <td className="nowrap">{l.user_agent}</td>
                   </tr>

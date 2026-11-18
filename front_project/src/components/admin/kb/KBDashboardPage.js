@@ -235,18 +235,20 @@ function CanvasLineChart({
     const canvas = ref.current;
     if (!canvas) return;
 
-    const dpr = Math.max(1, Math.floor(window.devicePixelRatio || 1));
-    const cssW = canvas.clientWidth || 560;
-    const cssH = canvas.clientHeight || 220;
+    let frameId = 0;
+    const draw = () => {
+      const dpr = Math.max(1, window.devicePixelRatio || 1);
+      const cssW = Math.max(1, canvas.clientWidth || 560);
+      const cssH = Math.max(1, canvas.clientHeight || 220);
 
-    canvas.width = Math.floor(cssW * dpr);
-    canvas.height = Math.floor(cssH * dpr);
+      canvas.width = Math.floor(cssW * dpr);
+      canvas.height = Math.floor(cssH * dpr);
 
-    const ctx = canvas.getContext('2d');
-    if (!ctx) return;
+      const ctx = canvas.getContext('2d');
+      if (!ctx) return;
 
-    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    ctx.clearRect(0, 0, cssW, cssH);
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      ctx.clearRect(0, 0, cssW, cssH);
 
     const arr = (Array.isArray(values) ? values : []).map((v) => Number(v) || 0);
     if (arr.length < 2) return;
@@ -295,7 +297,26 @@ function CanvasLineChart({
     ctx.lineWidth = 3.2;
     ctx.lineCap = 'round';
     ctx.lineJoin = 'round';
-    ctx.stroke(p);
+      ctx.stroke(p);
+    };
+
+    const scheduleDraw = () => {
+      window.cancelAnimationFrame(frameId);
+      frameId = window.requestAnimationFrame(draw);
+    };
+
+    scheduleDraw();
+    const resizeObserver = typeof ResizeObserver !== 'undefined'
+      ? new ResizeObserver(scheduleDraw)
+      : null;
+    resizeObserver?.observe(canvas);
+    window.addEventListener('resize', scheduleDraw);
+
+    return () => {
+      resizeObserver?.disconnect();
+      window.removeEventListener('resize', scheduleDraw);
+      window.cancelAnimationFrame(frameId);
+    };
   }, [values, themeKey, lineColorVar, fillStartVar, fillEndVar]);
 
   return <canvas ref={ref} className={className} aria-hidden="true" />;
@@ -498,8 +519,16 @@ function KbDashboardView({ kbId }) {
             <div className="kb-v2-vizCenter">
               <div className="kb-v2-ringWrap" aria-hidden="true">
                 <svg className="kb-v2-ring" viewBox="0 0 40 40">
-                  <circle className="kb-v2-ringBg" cx="20" cy="20" r="14" />
-                  <circle className="kb-v2-ringFg" cx="20" cy="20" r="14" strokeDasharray={`${ringPct} 100`} />
+                  <circle className="kb-v2-ringBg" cx="20" cy="20" r="14" pathLength="100" />
+                  <circle
+                    className="kb-v2-ringFg"
+                    cx="20"
+                    cy="20"
+                    r="14"
+                    pathLength="100"
+                    strokeDasharray={`${ringPct} ${100 - ringPct}`}
+                  />
+                  <text className="kb-v2-ringText" x="20" y="20">{Math.round(ringPct)}%</text>
                 </svg>
               </div>
             </div>

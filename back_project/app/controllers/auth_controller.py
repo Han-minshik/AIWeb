@@ -8,5 +8,6 @@ router.post('/logout')(service.logout)
 router.get('/me')(service.me)
 router.get('/admin/check')(service.admin_check)
 router.get('/users/me')(service.users_me_alias)
+router.post('/entry-token/{target}')(service.entry_token)
 
 __all__ = ['router']

@@ -2,8 +2,11 @@ import React, { useMemo } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import remarkBreaks from 'remark-breaks';
+import remarkMath from 'remark-math';
 import rehypeRaw from 'rehype-raw';
+import rehypeKatex from 'rehype-katex';
 import DOMPurify from 'dompurify';
+import 'katex/dist/katex.min.css';
 
 export default function MarkdownBlock({ content = '', preserveLineBreaks = false, className = '' }) {
   const safe = useMemo(() => {
@@ -17,7 +20,7 @@ export default function MarkdownBlock({ content = '', preserveLineBreaks = false
     return clean;
   }, [content]);
   const remarkPlugins = useMemo(
-    () => (preserveLineBreaks ? [remarkGfm, remarkBreaks] : [remarkGfm]),
+    () => (preserveLineBreaks ? [remarkGfm, remarkMath, remarkBreaks] : [remarkGfm, remarkMath]),
     [preserveLineBreaks]
   );
 
@@ -25,7 +28,7 @@ export default function MarkdownBlock({ content = '', preserveLineBreaks = false
     <div className={`md markdown-body ${className}`.trim()}>
       <ReactMarkdown
         remarkPlugins={remarkPlugins}
-        rehypePlugins={[rehypeRaw]}
+        rehypePlugins={[rehypeRaw, rehypeKatex]}
         components={{
           a: ({ node, ...props }) => (
             <a {...props} target="_blank" rel="noopener noreferrer">

@@ -9,6 +9,7 @@ import Pane from '../components/panes/Pane';
 import AICatalogPanel from '../components/ai/AICatalogPanel';
 
 import NotificationsModal from '../components/modals/NotificationsModal';
+import PersonalKbModal from '../components/modals/PersonalKbModal';
 import UserProfileMenu from '../components/UserProfileMenu';
 import HamburgerMenu from '../components/menus/HamburgerMenu';
 
@@ -56,6 +57,7 @@ export default function Main() {
 
   const [openHam, setOpenHam] = useState(false);
   const [openNotif, setOpenNotif] = useState(false);
+  const [openPersonalKb, setOpenPersonalKb] = useState(false);
   const [openProfile, setOpenProfile] = useState(false);
   const [profileAnchor, setProfileAnchor] = useState(null);
   const [isAdmin, setIsAdmin] = useState(false);
@@ -64,6 +66,7 @@ export default function Main() {
   const [settingsAnchor, setSettingsAnchor] = useState(null);
   const [settingsPos, setSettingsPos] = useState({ top: 56, left: 8 });
   const [settingsMenuRect, setSettingsMenuRect] = useState(null);
+  const [imageViewerOpen, setImageViewerOpen] = useState(false);
 
   const settingsBtnRef = useRef(null);
   const settingsMenuRef = useRef(null);
@@ -104,6 +107,14 @@ export default function Main() {
     const u = window?.AppUser;
     if (u) setIsAdmin(deriveIsAdmin(u));
   }, [openProfile, deriveIsAdmin]);
+
+  useEffect(() => {
+    const onImageViewerState = (e) => {
+      setImageViewerOpen(Boolean(e?.detail?.open));
+    };
+    window.addEventListener('ui:image-viewer-state', onImageViewerState);
+    return () => window.removeEventListener('ui:image-viewer-state', onImageViewerState);
+  }, []);
 
   useEffect(() => {
     const onVaultSelect = (e) => {
@@ -420,7 +431,7 @@ export default function Main() {
           </div>
         </section>
 
-        <EdgeToggle side="right" open={rightOpen} onToggle={toggleRight} />
+        {!imageViewerOpen && <EdgeToggle side="right" open={rightOpen} onToggle={toggleRight} />}
         <RightSidebar rightOpen={rightOpen} />
 
         <AICatalogPanel />
@@ -429,6 +440,7 @@ export default function Main() {
       <HamburgerMenu open={openHam} onClose={() => setOpenHam(false)} />
 
       <NotificationsModal open={openNotif} onClose={closeNotif} items={sampleNotifications} />
+      <PersonalKbModal open={openPersonalKb} onClose={() => setOpenPersonalKb(false)} />
 
       <UserProfileMenu
         open={openProfile}
@@ -437,7 +449,13 @@ export default function Main() {
         onAction={(key) => {
           if (key === 'logout') handleLogout();
           if (key === 'admin') window.location.href = '/admin';
-          if (key === 'settings') console.log('Open Settings');
+          if (key === 'my-kb') setOpenPersonalKb(true);
+          if (key === 'settings') {
+            onOpenSettings();
+            setSettingsAnchor(profileAnchor);
+            setSettingsOpen(true);
+            setThemeOpen(false);
+          }
         }}
         isAdmin={isAdmin}
       />

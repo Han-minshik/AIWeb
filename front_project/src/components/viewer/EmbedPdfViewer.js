@@ -1,5 +1,7 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { getSynapJob } from '../../services/docs/docService';
+import useDownload from '../../hooks/useDownload';
+import '../../styles/components/embed-pdf-viewer.css';
 
 function stripKnownExtension(name, fileRight) {
   const full = String(name || '').trim();
@@ -43,6 +45,7 @@ function readUiTheme() {
 export default function EmbedPdfViewer({
   docId,
   objectId,
+  aiDocumentId,
   docTitle,
   docRelPath,
   docSubPath,
@@ -54,7 +57,24 @@ export default function EmbedPdfViewer({
   const [viewerUrl, setViewerUrl] = useState(null);
   const [error, setError] = useState(null);
   const [loading, setLoading] = useState(false);
+  const [downloading, setDownloading] = useState(false);
+  const [downloadError, setDownloadError] = useState('');
   const [uiTheme, setUiTheme] = useState(() => readUiTheme());
+  const { downloadLatest } = useDownload();
+  const downloadId = docId ?? objectId ?? null;
+
+  const handleDownload = async () => {
+    if (downloadId == null || downloading) return;
+    setDownloading(true);
+    setDownloadError('');
+    try {
+      await downloadLatest(downloadId);
+    } catch (downloadFailure) {
+      setDownloadError(downloadFailure?.message || 'Download failed.');
+    } finally {
+      setDownloading(false);
+    }
+  };
 
   const normalizedPage = useMemo(() => {
     const n = Number(initialPage);
@@ -93,6 +113,7 @@ export default function EmbedPdfViewer({
         const result = await getSynapJob({
           doc_id: docId ?? null,
           object_id: objectId ?? null,
+          ai_document_id: aiDocumentId ?? null,
           name: lookupName,
           stored_path: stored,
           relative_path: docRelPath ?? null,
@@ -115,7 +136,7 @@ export default function EmbedPdfViewer({
       }
     };
 
-    if (docId != null || objectId != null || docTitle || docStoredPath) run();
+    if (docId != null || objectId != null || aiDocumentId || docTitle || docStoredPath) run();
 
     return () => {
       cancelled = true;
@@ -123,6 +144,7 @@ export default function EmbedPdfViewer({
   }, [
     docId,
     objectId,
+    aiDocumentId,
     docTitle,
     docRelPath,
     docSubPath,
@@ -133,7 +155,7 @@ export default function EmbedPdfViewer({
     uiTheme,
   ]);
 
-  if (docId == null && objectId == null && !docTitle && !docStoredPath) {
+  if (docId == null && objectId == null && !aiDocumentId && !docTitle && !docStoredPath) {
     return (
       <div className="viewer embedpdf-viewer">
         <div className="fallback">No file selected.</div>
@@ -143,26 +165,42 @@ export default function EmbedPdfViewer({
 
   if (error) {
     return (
-      <div className="viewer embedpdf-viewer">
-        <div className="fallback">{error}</div>
+      <div className="viewer embedpdf-viewer synap-viewer-shell">
+        <div className="document-viewer-toolbar">
+          <span className="document-viewer-title" title={String(docTitle || '')}>{docTitle || 'Document'}</span>
+          <button className="btn document-download-btn" type="button" onClick={handleDownload} disabled={downloadId == null || downloading}>
+            {downloading ? 'Downloading...' : 'Download original'}
+          </button>
+        </div>
+        {downloadError && <div className="document-download-error">{downloadError}</div>}
+        <div className="synap-viewer-content">
+          <div className="fallback">{error}</div>
+        </div>
       </div>
     );
   }
 
   return (
     <div
-      className="viewer embedpdf-viewer"
-      style={{ width: '100%', height: '100%', overflow: 'hidden', position: 'relative' }}
+      className="viewer embedpdf-viewer synap-viewer-shell"
     >
-      {(loading || !viewerUrl) && <div className="loading">Document Loading...</div>}
-      {viewerUrl ? (
-        <iframe
-          title={String(docTitle || 'Synap Document Viewer')}
-          src={viewerUrl}
-          style={{ width: '100%', height: '100%', border: 0 }}
-          allowFullScreen
-        />
-      ) : null}
+      <div className="document-viewer-toolbar">
+        <span className="document-viewer-title" title={String(docTitle || '')}>{docTitle || 'Document'}</span>
+        <button className="btn document-download-btn" type="button" onClick={handleDownload} disabled={downloadId == null || downloading}>
+          {downloading ? 'Downloading...' : 'Download original'}
+        </button>
+      </div>
+      {downloadError && <div className="document-download-error">{downloadError}</div>}
+      <div className="synap-viewer-content">
+        {(loading || !viewerUrl) && <div className="loading">Document Loading...</div>}
+        {viewerUrl ? (
+          <iframe
+            title={String(docTitle || 'Synap Document Viewer')}
+            src={viewerUrl}
+            allowFullScreen
+          />
+        ) : null}
+      </div>
     </div>
   );
 }

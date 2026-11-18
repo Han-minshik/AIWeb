@@ -1,7 +1,12 @@
 import { extractErrorMessage, reportClientError } from '../errors/errorReporter';
-const API_BASE = process.env.REACT_APP_API_BASE || 'http://localhost:8001';
+const API_BASE = import.meta.env.VITE_API_BASE || '/api';
 const DEFAULT_TIMEOUT = 300000;
 const AUTO_REDIRECT_401 = true;
+const GATEWAY_RETRY_STATUSES = new Set([502, 503, 504]);
+
+function wait(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
 
 function getToken() {
   try {
@@ -11,10 +16,33 @@ function getToken() {
   }
 }
 
+function decodeJwtPayload(token) {
+  if (!token || typeof token !== 'string') return null;
+  try {
+    const part = token.split('.')[1];
+    if (!part) return null;
+    const normalized = part.replace(/-/g, '+').replace(/_/g, '/');
+    const padded = normalized.padEnd(normalized.length + ((4 - (normalized.length % 4)) % 4), '=');
+    return JSON.parse(atob(padded));
+  } catch {
+    return null;
+  }
+}
+
+function getCurrentUserId() {
+  const tokenUserId = decodeJwtPayload(getToken())?.sub;
+  if (tokenUserId != null && tokenUserId !== '') return String(tokenUserId);
+  try {
+    return (typeof window !== 'undefined' && localStorage.getItem('x_user_id')) || '1';
+  } catch {
+    return '1';
+  }
+}
+
 function baseHeaders(isJson, extra) {
   const token = getToken();
   const h = {
-    'X-User-Id': (typeof window !== 'undefined' && localStorage.getItem('x_user_id')) || '1',
+    'X-User-Id': getCurrentUserId(),
     'X-Username': (typeof window !== 'undefined' && localStorage.getItem('x_username')) || 'demo',
     ...(token ? { Authorization: `Bearer ${token}` } : {}),
     ...(extra || {}),
@@ -24,7 +52,8 @@ function baseHeaders(isJson, extra) {
 }
 
 function buildURL(path, params) {
-  const url = new URL(path.startsWith('http') ? path : `${API_BASE}${path}`);
+  const rawUrl = path.startsWith('http') ? path : `${API_BASE}${path}`;
+  const url = new URL(rawUrl, window.location.origin);
   if (params) {
     Object.entries(params).forEach(([k, v]) => {
       if (v == null || v === '') return;
@@ -59,7 +88,14 @@ async function handleResponse(res) {
       body = isJSON ? await res.json() : await res.text();
       if (isJSON && body && typeof body === 'object') {
         const serverErr = body.error || {};
-        msg = serverErr.message || body.message || `HTTP ${res.status}`;
+        const bodyDetail = body.detail;
+        const detailMessage =
+          typeof bodyDetail === 'string'
+            ? bodyDetail
+            : bodyDetail && typeof bodyDetail === 'object'
+            ? bodyDetail.message || JSON.stringify(bodyDetail)
+            : '';
+        msg = serverErr.message || body.message || detailMessage || `HTTP ${res.status}`;
         detail = serverErr.detail ? JSON.stringify(serverErr.detail) : '';
       } else {
         msg = typeof body === 'string' ? body : `HTTP ${res.status}`;
@@ -70,6 +106,8 @@ async function handleResponse(res) {
     const message = [msg, detail].filter(Boolean).join(' | ');
     const err = new Error(message || `HTTP ${res.status}`);
     err.status = res.status;
+    err.body = body;
+    err.detail = body?.detail ?? body?.error?.detail ?? null;
     err.response = res;
     err.requestId = requestIdHeader || body?.error?.request_id || '';
     err.path = res.url;
@@ -87,11 +125,17 @@ async function handleResponse(res) {
 }
 
 function request(method, path, body, opts = {}) {
-  const { params, headers, timeout } = opts;
+  const {
+    params,
+    headers,
+    timeout,
+    gatewayRetries = 0,
+    gatewayRetryDelay = 1000,
+  } = opts;
 
   const nextParams = { ...(params || {}) };
   if (typeof path === 'string' && path.startsWith('/kb')) {
-    const uid = (typeof window !== 'undefined' && localStorage.getItem('x_user_id')) || '1';
+    const uid = getCurrentUserId();
     if (!('user_id' in nextParams) || nextParams.user_id == null || nextParams.user_id === '') {
       nextParams.user_id = uid;
     }
@@ -101,21 +145,24 @@ function request(method, path, body, opts = {}) {
   const isForm = (typeof FormData !== 'undefined') && body instanceof FormData;
   const isJson = !!body && !isForm;
 
-  const controller = new AbortController();
-  const to = setTimeout(() => controller.abort(), Math.max(1, timeout || DEFAULT_TIMEOUT));
+  const maxGatewayRetries = Math.max(0, Math.min(3, Number(gatewayRetries) || 0));
 
-  const init = {
-    method,
-    headers: baseHeaders(isJson, headers),
-    signal: controller.signal,
-  };
-  if (body != null) {
-    init.body = isForm ? body : JSON.stringify(body);
-  }
+  const execute = async (attempt = 0) => {
+    const controller = new AbortController();
+    const to = setTimeout(() => controller.abort(), Math.max(1, timeout || DEFAULT_TIMEOUT));
+    const init = {
+      method,
+      headers: baseHeaders(isJson, headers),
+      credentials: 'include',
+      signal: controller.signal,
+    };
+    if (body != null) {
+      init.body = isForm ? body : JSON.stringify(body);
+    }
 
-  return fetch(url, init)
-    .then(handleResponse)
-    .catch((err) => {
+    try {
+      return await fetch(url, init).then(handleResponse);
+    } catch (err) {
       if (err?.name === 'AbortError') {
         const timeoutErr = new Error('Request timed out');
         timeoutErr.status = 408;
@@ -128,6 +175,10 @@ function request(method, path, body, opts = {}) {
         });
         throw timeoutErr;
       }
+      if (GATEWAY_RETRY_STATUSES.has(Number(err?.status)) && attempt < maxGatewayRetries) {
+        await wait(Math.max(0, Number(gatewayRetryDelay) || 0) * (2 ** attempt));
+        return execute(attempt + 1);
+      }
       if (err?.status == null) {
         reportClientError(err, {
           source: 'http-network',
@@ -135,12 +186,21 @@ function request(method, path, body, opts = {}) {
         });
       }
       throw err;
-    })
-    .finally(() => clearTimeout(to));
+    } finally {
+      clearTimeout(to);
+    }
+  };
+
+  return execute();
 }
 
 function get(path, params, opts = {}) {
-  return request('GET', path, undefined, { ...opts, params });
+  return request('GET', path, undefined, {
+    gatewayRetries: 2,
+    gatewayRetryDelay: 500,
+    ...opts,
+    params,
+  });
 }
 function post(path, body, opts = {}) {
   return request('POST', path, body, opts);
@@ -152,5 +212,66 @@ function _delete(path, body, opts = {}) {
   return request('DELETE', path, body, opts);
 }
 
-export const http = { get, post, patch, delete: _delete };
+function upload(path, body, opts = {}) {
+  const { headers, onProgress, timeout = 0 } = opts;
+  const url = buildURL(path);
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open('PUT', url.toString(), true);
+    xhr.withCredentials = true;
+    xhr.timeout = Math.max(0, Number(timeout) || 0);
+    Object.entries(baseHeaders(false, headers)).forEach(([key, value]) => {
+      if (value != null) xhr.setRequestHeader(key, String(value));
+    });
+    if (typeof onProgress === 'function') {
+      xhr.upload.onprogress = (event) => {
+        onProgress({
+          loaded: event.loaded,
+          total: event.lengthComputable ? event.total : body?.size || 0,
+          percent: event.lengthComputable && event.total > 0
+            ? Math.round((event.loaded / event.total) * 100)
+            : null,
+        });
+      };
+    }
+    xhr.onload = () => {
+      let payload = xhr.responseText;
+      try { payload = payload ? JSON.parse(payload) : true; } catch {}
+      if (xhr.status >= 200 && xhr.status < 300) {
+        resolve(payload);
+        return;
+      }
+      const message = payload?.detail || payload?.error?.message || `HTTP ${xhr.status}`;
+      const error = new Error(String(message));
+      error.status = xhr.status;
+      error.path = url.toString();
+      error.userMessage = extractErrorMessage(error, `Upload failed (${xhr.status}).`);
+      reportClientError(error, { source: 'http-upload', status: xhr.status, path: error.path });
+      reject(error);
+    };
+    xhr.onerror = () => {
+      const error = new Error('Upload network error');
+      error.path = url.toString();
+      error.userMessage = 'Upload failed because the server could not be reached.';
+      reportClientError(error, { source: 'http-upload-network', path: error.path });
+      reject(error);
+    };
+    xhr.ontimeout = () => {
+      const error = new Error('Upload timed out');
+      error.status = 408;
+      error.path = url.toString();
+      error.userMessage = 'Upload timed out. Please try again.';
+      reject(error);
+    };
+    xhr.onabort = () => {
+      const error = new Error('Upload cancelled');
+      error.status = 499;
+      error.path = url.toString();
+      reject(error);
+    };
+    xhr.send(body);
+  });
+}
+
+export const http = { get, post, patch, delete: _delete, upload };
 export default http;

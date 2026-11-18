@@ -11,8 +11,23 @@ function normalizeList(data) {
   };
 }
 
-export async function listUsers({ q = '', page = 1, page_size = 20 } = {}) {
-  const res = await http.get('/admin/users', { q, page, page_size });
+export async function listUsers({
+  q = '',
+  page = 1,
+  page_size = 20,
+  group_id = null,
+  group_empty = false,
+  position_id = null,
+  position_empty = false,
+  is_admin = null,
+} = {}) {
+  const params = { q, page, page_size };
+  if (group_id != null && group_id !== '') params.group_id = group_id;
+  if (group_empty) params.group_empty = true;
+  if (position_id != null && position_id !== '') params.position_id = position_id;
+  if (position_empty) params.position_empty = true;
+  if (is_admin != null && is_admin !== '') params.is_admin = is_admin;
+  const res = await http.get('/admin/users', params);
   return normalizeList(res);
 }
 
@@ -28,10 +43,36 @@ export async function deleteUser(userId) {
   return await http.delete(`/admin/users/${userId}`);
 }
 
+export async function permanentlyDeleteUser(userId) {
+  return await http.delete(`/admin/users/${userId}/permanent`);
+}
+
 export async function toggleAdmin(userId, isAdmin) {
   return updateUser(userId, { is_admin: !!isAdmin });
 }
 
-export async function resetPassword(userId, newPassword) {
-  return await http.post(`/admin/users/${userId}/reset_password`, { password: newPassword });
+export async function listDepartments() {
+  const res = await http.get('/admin/departments', {});
+  return Array.isArray(res) ? res : (res?.items || []);
+}
+
+export async function createDepartment(name) {
+  return await http.post('/admin/departments', { name });
+}
+
+export async function getGroupUsage(groupId) {
+  return await http.get(`/admin/groups/${groupId}/usage`, {});
+}
+
+export async function listPositions() {
+  const res = await http.get('/admin/positions', {});
+  return Array.isArray(res) ? res : (res?.items || []);
+}
+
+export async function createPosition(name) {
+  return await http.post('/admin/positions', { name });
+}
+
+export async function deletePosition(positionId) {
+  return await http.delete(`/admin/positions/${positionId}`);
 }

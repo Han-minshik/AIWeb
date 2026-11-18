@@ -8,7 +8,6 @@ import {
 } from '../../services/chat/chatService';
 import { streamQaEvents } from '../../services/qa/qaStreamService';
 import {
-  API_BASE,
   STAGE_TO_TICKER,
   collectImagesFromSources,
   enrichSources,
@@ -126,6 +125,9 @@ export default function QAEventBridge() {
         appType,
         kbName,
         kbId,
+        userId,
+        itemTypeCode,
+        itemTypeCodes,
         docId,
       } = buildQaSubmitContext(detail, resolveAppType);
       if (!text) return;
@@ -148,6 +150,8 @@ export default function QAEventBridge() {
           engine: 'rag',
           kb_id: kbId || undefined,
           kb_name: kbName || undefined,
+          item_type_code:
+            source === 'vault' ? itemTypeCode ?? undefined : itemTypeCodes.length ? itemTypeCodes : undefined,
           selected_doc_ids: selectedDocIdsForBookmark.length
             ? selectedDocIdsForBookmark
             : undefined,
@@ -165,6 +169,8 @@ export default function QAEventBridge() {
             engine: 'rag',
             kb_id: kbId || undefined,
             kb_name: kbName || undefined,
+            item_type_code:
+              source === 'vault' ? itemTypeCode ?? undefined : itemTypeCodes.length ? itemTypeCodes : undefined,
             selected_doc_ids: selectedDocIdsForBookmark.length
               ? selectedDocIdsForBookmark
               : undefined,
@@ -195,6 +201,19 @@ export default function QAEventBridge() {
         reqBody.source = 'bookmark';
       } else if (source === 'activeDoc') {
         if (docId != null) reqBody.doc_id = docId;
+        if (userId != null && userId !== '') reqBody.user_id = userId;
+      } else if (source === 'personal') {
+        reqBody.source = 'personal';
+        if (userId != null && userId !== '') reqBody.user_id = userId;
+        if (itemTypeCodes.length) reqBody.item_type_code = itemTypeCodes;
+      } else if (source === 'vault') {
+        reqBody.source = source;
+        if (kbId != null) reqBody.kb_id = kbId;
+        if (itemTypeCode != null) reqBody.item_type_code = itemTypeCode;
+      } else if (itemTypeCodes.length) {
+        reqBody.item_type_code = itemTypeCodes;
+        if (kbId != null) reqBody.kb_id = kbId;
+        if (source) reqBody.source = source;
       } else if (cat) {
         reqBody.cat = cat;
       }
@@ -213,6 +232,7 @@ export default function QAEventBridge() {
         kbName,
         selectedDocIdsForBookmark,
         source,
+        itemTypeCodes,
         cat,
       };
 
@@ -289,14 +309,10 @@ export default function QAEventBridge() {
           const thumb_mime = donePayload.thumb_mime || meta.thumb_mime || 'image/jpeg';
 
           const pickUrl = (x) => (typeof x === 'string' ? x : (x?.url || x?.href || x?.path || ''));
-          const abs = (u) =>
-            u && !/^https?:\/\//i.test(u) && !/^data:/i.test(u)
-              ? `${API_BASE}${u.startsWith('/') ? u : `/${u}`}`
-              : u;
           let normalizedImageUrls = (Array.isArray(finImagesRaw) ? finImagesRaw : [])
             .map(pickUrl)
             .filter(Boolean)
-            .map(abs);
+            .map(toAbsUrl);
 
           if (!normalizedImageUrls.length && finSources.length) {
             normalizedImageUrls = collectImagesFromSources(finSources);
@@ -372,7 +388,7 @@ export default function QAEventBridge() {
         const controller = new AbortController();
         streamAbortController = controller;
         await streamQaEvents({
-          path: `${API_BASE}/qa/stream`,
+          path: '/qa/stream',
           token,
           payload: reqBody,
           signal: controller.signal,
@@ -385,7 +401,7 @@ export default function QAEventBridge() {
       } catch {
         if (!isActiveRun(runId)) return;
         ticker.error();
-        sendAssistantToSidebar({ sessionId: sid, content: '[Straming Err.]', runId });
+        sendAssistantToSidebar({ sessionId: sid, content: '[Streaming Error.]', runId });
         if (streamState && streamState.runId === runId) {
           streamState = null;
         }
@@ -404,6 +420,9 @@ export default function QAEventBridge() {
         appType,
         kbName,
         kbId,
+        source,
+        itemTypeCode,
+        itemTypeCodes,
         docId,
       } = buildQaSubmitContext(d, resolveAppType);
       if (!text) return;
@@ -419,6 +438,8 @@ export default function QAEventBridge() {
           engine: 'rag',
           kb_id: kbId || undefined,
           kb_name: kbName || undefined,
+          item_type_code:
+            source === 'vault' ? itemTypeCode ?? undefined : itemTypeCodes.length ? itemTypeCodes : undefined,
           selected_doc_ids: selectedDocIdsForBookmark.length
             ? selectedDocIdsForBookmark
             : undefined,
@@ -434,6 +455,8 @@ export default function QAEventBridge() {
             engine: 'rag',
             kb_id: kbId || undefined,
             kb_name: kbName || undefined,
+            item_type_code:
+              source === 'vault' ? itemTypeCode ?? undefined : itemTypeCodes.length ? itemTypeCodes : undefined,
             selected_doc_ids: selectedDocIdsForBookmark.length
               ? selectedDocIdsForBookmark
               : undefined,
@@ -454,6 +477,8 @@ export default function QAEventBridge() {
       const res = await ragQuery(text, 5, {
         kb_id: kbId || undefined,
         doc_id: docId ?? undefined,
+        item_type_code:
+          source === 'vault' ? itemTypeCode ?? undefined : itemTypeCodes.length ? itemTypeCodes : undefined,
         session_id: sid,
       });
       answer = res?.answer || '';

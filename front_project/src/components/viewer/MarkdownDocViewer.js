@@ -3,10 +3,15 @@ import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import remarkBreaks from 'remark-breaks';
 import rehypeRaw from 'rehype-raw';
-import { getDocMetaByObjectId, loadMarkdownByRoutes } from '../../services/docs/docService';
+import {
+  downloadLatestDocBlob,
+  getDocMetaByAiDocumentId,
+  getDocMetaByObjectId,
+  loadMarkdownByRoutes,
+} from '../../services/docs/docService';
 import '../../styles/components/markdown-doc-viewer.css';
 
-const API_BASE = process.env.REACT_APP_API_BASE || 'http://localhost:8001';
+const API_BASE = import.meta.env.VITE_API_BASE || '/api';
 
 function toAbsApiUrl(path) {
   const origin = window.location.origin;
@@ -113,6 +118,7 @@ function parseLooseMarkdownImage(text) {
 export default function MarkdownDocViewer({
   docId,
   objectId,
+  aiDocumentId,
   docTitle,
   docRelPath,
   docSubPath,
@@ -164,14 +170,27 @@ export default function MarkdownDocViewer({
     (async () => {
       setLoading(true);
       try {
+        const downloadId = objectId ?? docId;
+        if (downloadId != null) {
+          const { blob } = await downloadLatestDocBlob(downloadId);
+          const text = await blob.text();
+          if (!cancelled) {
+            setContent(text || '');
+            setBaseUploadDir('');
+            setResolvedBaseRoute('');
+          }
+          return;
+        }
         const fileNameRaw = String(docTitle || '').trim() || 'document';
         const trailingExt = extractTrailingExt(fileNameRaw);
         const hasUsableTrailingExt = isLikelyFileExt(trailingExt);
 
         let resolvedRight = normalizeExt(docFileRight);
-        if (!resolvedRight && objectId != null) {
+        if (!resolvedRight && (objectId != null || aiDocumentId)) {
           try {
-            const meta = await getDocMetaByObjectId(objectId);
+            const meta = objectId != null
+              ? await getDocMetaByObjectId(objectId)
+              : await getDocMetaByAiDocumentId(aiDocumentId);
             const fileNameFromMeta = fileNameFromStoredPath(meta?.name);
             const extFromMetaName = extractTrailingExt(fileNameFromMeta);
             if (isLikelyFileExt(extFromMetaName)) {
@@ -222,7 +241,7 @@ export default function MarkdownDocViewer({
     return () => {
       cancelled = true;
     };
-  }, [docId, objectId, docTitle, docRelPath, docSubPath, docFileRight, branchTypeNorm, preferredBaseRoute, candidateBaseRoutes, ext]);
+  }, [docId, objectId, aiDocumentId, docTitle, docRelPath, docSubPath, docFileRight, branchTypeNorm, preferredBaseRoute, candidateBaseRoutes, ext]);
 
   const components = useMemo(
     () => ({
@@ -236,9 +255,12 @@ export default function MarkdownDocViewer({
 
         const raw = normalizeImgSrc(hit.src);
         if (!raw) return <p>{children}</p>;
-        const isAbs = /^https?:\/\//i.test(raw) || raw.startsWith('data:');
+        const isAbs = /^https?:\/\//i.test(raw) || raw.startsWith('data:') || raw.startsWith('blob:') || raw.startsWith('/');
         const resolved = resolveRelativePath(baseUploadDir, raw);
-        const finalSrc = isAbs ? raw : toAbsApiUrl(`${resolvedBaseRoute}/${encodePath(resolved)}`);
+        const artifactDocId = objectId ?? docId;
+        const finalSrc = !isAbs && branchTypeNorm === 'KIWIX' && artifactDocId != null
+          ? toAbsApiUrl(`/docs/${artifactDocId}/artifacts/${encodePath(raw)}`)
+          : (isAbs ? raw : toAbsApiUrl(`${resolvedBaseRoute}/${encodePath(resolved)}`));
         return (
           <p>
             <img src={finalSrc} alt={hit.alt || ''} loading="lazy" />
@@ -248,16 +270,24 @@ export default function MarkdownDocViewer({
       img: ({ src, alt }) => {
         const raw = normalizeImgSrc(src);
         if (!raw) return null;
-        const isAbs = /^https?:\/\//i.test(raw) || raw.startsWith('data:');
+        const isAbs = /^https?:\/\//i.test(raw) || raw.startsWith('data:') || raw.startsWith('blob:') || raw.startsWith('/');
         const resolved = resolveRelativePath(baseUploadDir, raw);
-        const finalSrc = isAbs ? raw : toAbsApiUrl(`${resolvedBaseRoute}/${encodePath(resolved)}`);
+        const artifactDocId = objectId ?? docId;
+        const finalSrc = !isAbs && branchTypeNorm === 'KIWIX' && artifactDocId != null
+          ? toAbsApiUrl(`/docs/${artifactDocId}/artifacts/${encodePath(raw)}`)
+          : (isAbs ? raw : toAbsApiUrl(`${resolvedBaseRoute}/${encodePath(resolved)}`));
         return <img src={finalSrc} alt={alt || ''} loading="lazy" />;
       },
+      table: ({ children }) => (
+        <div className="markdown-table-scroll">
+          <table>{children}</table>
+        </div>
+      ),
     }),
-    [baseUploadDir, resolvedBaseRoute]
+    [baseUploadDir, resolvedBaseRoute, objectId, docId, branchTypeNorm]
   );
 
-  if (!docId && !objectId && !docTitle) {
+  if (!docId && !objectId && !aiDocumentId && !docTitle) {
     return (
       <div className="viewer embedpdf-viewer">
         <div className="fallback">No file selected.</div>

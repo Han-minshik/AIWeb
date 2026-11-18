@@ -1,12 +1,37 @@
-import React, { useState } from 'react';
-import { login } from '../../services/auth/authService';
+import React, { useEffect, useState } from 'react';
+import { login, me } from '../../services/auth/authService';
 import '../../styles/pages/login.css';
 
 export default function Login() {
   const [id, setId] = useState('');
   const [password, setPassword] = useState('');
   const [submitting, setSubmitting] = useState(false);
+  const [checkingSession, setCheckingSession] = useState(true);
   const [error, setError] = useState('');
+
+  useEffect(() => {
+    let alive = true;
+    me()
+      .then(() => {
+        if (alive) window.location.replace('/');
+      })
+      .catch(() => {
+        if (alive) setCheckingSession(false);
+      });
+    return () => {
+      alive = false;
+    };
+  }, []);
+
+  if (checkingSession) {
+    return (
+      <div className="login-page">
+        <main className="login-card" role="main" aria-label="Login">
+          <div className="loading">Checking session...</div>
+        </main>
+      </div>
+    );
+  }
 
   const onSubmit = async (e) => {
     e.preventDefault();

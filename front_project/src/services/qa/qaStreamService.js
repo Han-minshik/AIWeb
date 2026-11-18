@@ -1,4 +1,4 @@
-const API_BASE = process.env.REACT_APP_API_BASE || 'http://localhost:8001';
+const API_BASE = import.meta.env.VITE_API_BASE || '/api';
 
 function buildQaStreamUrl(path = '/qa/stream') {
   if (/^https?:\/\//i.test(path)) return path;
@@ -28,6 +28,7 @@ export async function streamQaEvents({
   const res = await fetch(buildQaStreamUrl(path), {
     method: 'POST',
     headers,
+    credentials: 'include',
     body: JSON.stringify(payload),
     signal,
   });
@@ -92,4 +93,3 @@ export async function streamQaEvents({
     await onEvent(eventName, dataLines.join('\n'));
   }
 }
-

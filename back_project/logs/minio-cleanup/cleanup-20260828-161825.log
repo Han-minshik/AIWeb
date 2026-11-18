@@ -1,0 +1,2 @@
+[2026-08-28 16:18:25.78] MinIO cleanup started. Arguments: 
+{"dry_run": true, "candidates": {"failed_uploads": 0, "artifacts": 0, "purges": 0, "callbacks": 0, "jobs": 200}, "deleted": {"failed_uploads": 0, "artifacts": 0, "purges": 0, "callbacks": 0, "jobs": 0}, "errors": []}

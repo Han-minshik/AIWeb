@@ -2,7 +2,7 @@ const SKEY = 'qa.current_session_id';
 const LKEY = 'qa.last_assistant_message_id';
 const TOKEN_KEY = 'access_token';
 
-export const API_BASE = process.env.REACT_APP_API_BASE || 'http://localhost:8001';
+export const API_BASE = import.meta.env.VITE_API_BASE || '/api';
 
 export function getAccessToken() {
   try {
@@ -37,7 +37,7 @@ export function isForbidden(err) {
   const s = err?.status ?? err?.response?.status;
   if (s === 403) return true;
   const msg = (err?.detail || err?.message || '').toString();
-  return /403|forbidden|沅뚰븳\s*?占쎌쓬/i.test(msg);
+  return /403|forbidden|permission\s*denied|\uAD8C\uD55C\s*\uC5C6|\uC811\uADFC\s*\uAD8C\uD55C/i.test(msg);
 }
 
 export function unwrapSessions(res) {
@@ -48,8 +48,25 @@ export function unwrapSessions(res) {
 
 export function toAbsUrl(u) {
   if (!u) return '';
-  if (/^https?:\/\//i.test(u) || /^data:/i.test(u)) return u;
-  return `${API_BASE}${u.startsWith('/') ? u : `/${u}`}`;
+  const value = String(u).trim();
+  if (/^(?:https?:\/\/|data:|blob:)/i.test(value)) return value;
+
+  const base = String(API_BASE || '').trim().replace(/\/+$/, '');
+  const path = value.startsWith('/') ? value : `/${value}`;
+  if (!base) return path;
+
+  if (/^https?:\/\//i.test(base)) {
+    const parsedBase = new URL(base);
+    const basePath = parsedBase.pathname.replace(/\/+$/, '');
+    if (basePath && (path === basePath || path.startsWith(`${basePath}/`))) {
+      return `${parsedBase.origin}${path}`;
+    }
+    return `${base}${path}`;
+  }
+
+  const basePath = base.startsWith('/') ? base : `/${base}`;
+  if (path === basePath || path.startsWith(`${basePath}/`)) return path;
+  return `${base}${path}`;
 }
 
 export function toDataUri(raw, mime = 'image/jpeg') {

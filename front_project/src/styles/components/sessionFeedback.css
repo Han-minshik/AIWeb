@@ -22,6 +22,42 @@
   gap: 8px;
 }
 
+[data-theme="dark"] .feedback-filters-form .input {
+  background: #121824;
+  border-color: #334057;
+  color: #e7ebf4;
+}
+
+[data-theme="dark"] .feedback-filters-form .input:focus {
+  border-color: #6f9dff;
+  box-shadow: 0 0 0 3px rgba(91, 140, 255, .18);
+  outline: none;
+}
+
+[data-theme="dark"] .feedback-filters-form .btn.check {
+  background: rgba(91, 140, 255, .14);
+  border-color: rgba(91, 140, 255, .42);
+  color: #cfe0ff;
+}
+
+[data-theme="dark"] .feedback-filters-form .btn.check:hover {
+  background: rgba(91, 140, 255, .24);
+  border-color: rgba(91, 140, 255, .66);
+  color: #ffffff;
+}
+
+[data-theme="dark"] .feedback-filters-form .btn.ghost {
+  background: rgba(255, 255, 255, .04);
+  border-color: #344056;
+  color: #cbd5e1;
+}
+
+[data-theme="dark"] .feedback-filters-form .btn.ghost:hover {
+  background: rgba(255, 255, 255, .08);
+  border-color: #4b5d7a;
+  color: #ffffff;
+}
+
 .feedback-filters-label {
   font-size: 12px;
 }
@@ -34,11 +70,129 @@
   gap: 10px;
 }
 
+/* Feedback chart */
+
+.feedback-chart-card {
+  --feedback-chart-grid: #dfe5ee;
+  --feedback-chart-axis: #667085;
+  --feedback-chart-total: #94a3b8;
+  --feedback-chart-like: #14b8a6;
+  --feedback-chart-dislike: #f06464;
+  padding: 10px 12px 8px;
+  min-width: 0;
+  overflow: hidden;
+}
+
+[data-theme="dark"] .feedback-chart-card {
+  --feedback-chart-grid: #334057;
+  --feedback-chart-axis: #a8b6cb;
+  --feedback-chart-total: #8b98aa;
+  --feedback-chart-like: #2dd4bf;
+  --feedback-chart-dislike: #fb7185;
+  background: #121824;
+  border-color: #2f3a4d;
+}
+
+.feedback-chart-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px 16px;
+  margin-bottom: 4px;
+}
+
+.feedback-chart-heading,
+.feedback-chart-legend,
+.feedback-chart-legend label {
+  display: flex;
+  align-items: center;
+}
+
+.feedback-chart-heading {
+  gap: 10px;
+}
+
+.feedback-chart-heading .muted,
+.feedback-chart-legend label {
+  font-size: 12px;
+}
+
+.feedback-chart-legend {
+  flex-wrap: wrap;
+  gap: 6px 14px;
+}
+
+.feedback-chart-legend label {
+  gap: 5px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.feedback-chart-swatch {
+  width: 10px;
+  height: 10px;
+  border-radius: 2px;
+}
+
+.feedback-chart-scroll {
+  width: 100%;
+  overflow-x: auto;
+  overflow-y: hidden;
+}
+
+.feedback-chart-svg {
+  display: block;
+  width: 100%;
+  height: 220px;
+}
+
+.feedback-chart-grid-line {
+  stroke: var(--feedback-chart-grid);
+  stroke-width: 1;
+  shape-rendering: crispEdges;
+}
+
+.feedback-chart-axis-label {
+  fill: var(--feedback-chart-axis);
+  font-size: 10px;
+}
+
+.feedback-chart-x-label {
+  font-size: 10px;
+}
+
+.feedback-chart-bar-total {
+  fill: var(--feedback-chart-total);
+}
+
+.feedback-chart-bar-like {
+  fill: var(--feedback-chart-like);
+}
+
+.feedback-chart-bar-dislike {
+  fill: var(--feedback-chart-dislike);
+}
+
+.feedback-chart-empty {
+  min-height: 220px;
+  display: grid;
+  place-items: center;
+  font-size: 13px;
+}
+
 .kpi-card {
   padding: 10px 14px;
   display: flex;
   flex-direction: column;
   gap: 4px;
+}
+
+[data-theme="dark"] .kpi-card,
+[data-theme="dark"] .feedback-table-card,
+[data-theme="dark"] .feedback-detail {
+  background: #121824;
+  border-color: #2f3a4d;
 }
 
 .kpi-label {
@@ -97,6 +251,12 @@
   flex: 1;
 }
 
+[data-theme="dark"] .feedback-table-toolbar .input {
+  background: #0f141d;
+  border-color: #334057;
+  color: #e7ebf4;
+}
+
 .feedback-table-toggle {
   display: inline-flex;
   align-items: center;
@@ -130,12 +290,25 @@
   background: var(--bg-2);
 }
 
+[data-theme="dark"] .feedback-table th {
+  background: #141b27;
+  color: #a8b6cb;
+}
+
+[data-theme="dark"] .feedback-table td {
+  color: #dce5f3;
+}
+
 .feedback-row {
   cursor: pointer;
 }
 
 .feedback-row:hover {
   background: var(--hover);
+}
+
+[data-theme="dark"] .feedback-row:hover {
+  background: #20293a;
 }
 
 /* rating pill */
@@ -187,6 +360,10 @@
   padding: 10px 12px;
   border-bottom: 1px solid var(--line);
   background: var(--bg-2);
+}
+
+[data-theme="dark"] .feedback-detail-header {
+  background: #141b27;
 }
 
 .feedback-detail-body {

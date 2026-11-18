@@ -1,4 +1,4 @@
-const GRAPH_API_BASE = process.env.REACT_APP_GRAPH_API_BASE || 'http://15.165.181.171:8005';
+const GRAPH_API_BASE = import.meta.env.VITE_GRAPH_API_BASE || 'http://localhost:8005';
 
 function buildGraphUrl(path, params) {
   const qs = params instanceof URLSearchParams ? params.toString() : '';
@@ -24,4 +24,3 @@ export async function fetchSearchTermData(params) {
 export async function fetchHopAnalysisData(params) {
   return fetchGraphJson('/graph/hop_analysis', params, 'Failed to fetch hop analysis data');
 }
-

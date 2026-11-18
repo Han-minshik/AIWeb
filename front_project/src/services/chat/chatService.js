@@ -67,8 +67,7 @@ export async function getSession(sessionId) {
 
 export async function createSession(arg1 = 'Q&A Session', appType = 'LLM') {
   const summary = typeof arg1 === 'string' ? arg1 : (arg1 && arg1.summary) || 'Q&A Session';
-  const org_id = (typeof arg1 === 'object' && arg1.org_id) || 1;
-  const body = { org_id, summary, app_type: appType };
+  const body = { summary, app_type: appType };
   const res = await http.post('/chat/sessions', body);
   return normSession({ ...res, title: summary, app_type: appType });
 }

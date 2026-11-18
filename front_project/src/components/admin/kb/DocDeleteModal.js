@@ -1,39 +1,68 @@
 import React from 'react';
 import '../../../styles/admin/docDeleteModal.css';
 
-export default function DocDeleteModal({ open, count, onClose, onConfirm }) {
+export default function DocDeleteModal({
+  open,
+  documentName,
+  busy = false,
+  error = '',
+  onClose,
+  onConfirm,
+}) {
   if (!open) return null;
+
   return (
-    <div className="ddm-backdrop" onClick={onClose}>
-      <div className="ddm-modal" onClick={(e) => e.stopPropagation()}>
+    <div className="ddm-backdrop" onMouseDown={() => !busy && onClose?.()}>
+      <div
+        className="ddm-modal"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="document-delete-title"
+        onMouseDown={(event) => event.stopPropagation()}
+      >
         <div className="ddm-head">
-          <div className="ddm-title">문서 삭제</div>
-          <button type="button" className="ddm-close" onClick={onClose}>
-            ×
+          <div id="document-delete-title" className="ddm-title">
+            Delete document
+          </div>
+          <button
+            type="button"
+            className="ddm-close"
+            onClick={onClose}
+            disabled={busy}
+            aria-label="Close"
+          >
+            &times;
           </button>
         </div>
+
         <div className="ddm-body">
-          <div className="ddm-desc">
-            선택된 문서 {count}개를 삭제합니다.
+          <div className="ddm-desc">Move this document to Deleted Docs?</div>
+          <div className="ddm-target">{documentName || 'Selected document'}</div>
+          <div className="ddm-note">
+            The document remains recoverable until permanent purge is confirmed in Maintenance.
           </div>
+          {error && (
+            <div className="ddm-error" role="alert">
+              {error}
+            </div>
+          )}
           <div className="ddm-actions">
             <button
               type="button"
               className="ddm-btn"
-              onClick={() => onConfirm('latest')}
+              onClick={onClose}
+              disabled={busy}
             >
-              최신 버전만 삭제
+              Cancel
             </button>
             <button
               type="button"
               className="ddm-btn danger"
-              onClick={() => onConfirm('all')}
+              onClick={onConfirm}
+              disabled={busy}
             >
-              문서 전체 삭제
+              {busy ? 'Deleting...' : 'Delete document'}
             </button>
-          </div>
-          <div className="ddm-note">
-            최신 버전만 삭제 시 이전 버전이 최신으로 교체됩니다.
           </div>
         </div>
       </div>

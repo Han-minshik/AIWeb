@@ -92,7 +92,7 @@
 
 .table-head {
   display: grid;
-  grid-template-columns: 1fr 140px 140px;
+  grid-template-columns: 1fr 92px 140px 140px;
   background: var(--bg-2);
   border-bottom: 1px solid var(--line);
   padding: 8px 12px;
@@ -112,7 +112,7 @@
 
 .tr {
   display: grid;
-  grid-template-columns: 1fr 140px 140px;
+  grid-template-columns: 1fr 92px 140px 140px;
   align-items: center;
   background: var(--bg-elev);
   border: 1px solid transparent;
@@ -136,7 +136,9 @@
   text-align: left;
 }
 
-.col-created, .col-updated {
+.col-scope,
+.col-created,
+.col-updated {
   text-align: left;
   color: var(--muted);
   font-variant-numeric: tabular-nums;

@@ -10,15 +10,23 @@ function normalizeUser(r) {
   };
 }
 
-export async function me() {
+function persistUserMetadata(user) {
+  if (!user) return;
   try {
-    const r = await http.get('/auth/me');
-    return normalizeUser(r);
-  } catch {
-    const username = localStorage.getItem('x_username') || 'demo';
-    const is_admin = username === 'admin' || username === 'demo';
-    return { id: 0, username, email: '', is_admin };
-  }
+    if (user.id != null && Number(user.id) > 0) {
+      localStorage.setItem('x_user_id', String(user.id));
+    }
+    if (user.username) {
+      localStorage.setItem('x_username', String(user.username));
+    }
+  } catch {}
+}
+
+export async function me() {
+  const r = await http.get('/auth/me');
+  const user = normalizeUser(r);
+  persistUserMetadata(user);
+  return user;
 }
 
 export async function login(id, password) {
@@ -28,27 +36,19 @@ export async function login(id, password) {
   }
 
   const data = await http.post('/auth/login', { id: userId, password });
-  const token = data?.access_token || data?.token;
-  if (!token) {
-    throw new Error('The token is not in the response. Please check the backend response structure.');
-  }
+  const user = normalizeUser(data?.user || data);
 
+  // New browser sessions use the HttpOnly cookie set by the backend. Remove a
+  // stale browser-stored token after a successful login, while the HTTP client
+  // still supports pre-deployment legacy sessions until they sign in again.
   try {
-    localStorage.setItem('access_token', token);
+    localStorage.removeItem('access_token');
+    localStorage.removeItem('refresh_token');
   } catch {}
 
-  if (data?.user_id != null) {
-    try {
-      localStorage.setItem('x_user_id', String(data.user_id));
-    } catch {}
-  }
-  if (data?.username) {
-    try {
-      localStorage.setItem('x_username', String(data.username));
-    } catch {}
-  }
+  persistUserMetadata(user);
 
-  return { token, raw: data };
+  return { user, raw: data };
 }
 
 export async function logoutServer() {
@@ -83,4 +83,25 @@ export function clearClientSession() {
 export async function logoutAll() {
   await logoutServer();
   clearClientSession();
+}
+
+export async function createEntryToken(target) {
+  const data = await http.post('/auth/entry-token/' + encodeURIComponent(target), {});
+  if (!data?.token) throw new Error('Entry token was not returned.');
+  return data.token;
+}
+
+export async function openEntryApp(url, target) {
+  const popup = window.open('about:blank', '_blank');
+  if (popup) popup.opener = null;
+
+  try {
+    const token = await createEntryToken(target);
+    const launchUrl = String(url).split('#')[0] + '#t=' + encodeURIComponent(token);
+    if (popup) popup.location.replace(launchUrl);
+    else window.open(launchUrl, '_blank', 'noopener,noreferrer');
+  } catch (error) {
+    if (popup && !popup.closed) popup.close();
+    throw error;
+  }
 }

@@ -15,7 +15,7 @@ export default function UserProfileMenu({
     const vw = typeof window !== "undefined" ? window.innerWidth : 0;
     const vh = typeof window !== "undefined" ? window.innerHeight : 0;
     const approxW = 200;
-    const approxH = 140;
+    const approxH = 180;
 
     let top = rect ? Math.round(rect.top) : 48;
     let left = rect ? Math.round(rect.right + gap) : 60;
@@ -58,6 +58,7 @@ export default function UserProfileMenu({
   if (!open) return null;
 
   const items = [
+    { key: "my-kb", label: "My KB" },
     { key: "settings", label: "Setting" },
     ...(isAdmin ? [{ key: "admin", label: "Go to Admin" }] : []),
     { key: "logout", label: "Logout" },

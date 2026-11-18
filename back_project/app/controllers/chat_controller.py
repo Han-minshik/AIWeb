@@ -13,6 +13,5 @@ router.post('/feedback')(service.add_feedback)
 router.get('/feedback')(service.list_feedback)
 router.get('/feedback/stats')(service.feedback_stats)
 router.get('/messages/search')(service.search_messages)
-router.post('/sessions/{session_id}/feedback')(service.create_session_feedback)
 
 __all__ = ['router']

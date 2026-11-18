@@ -44,7 +44,6 @@ export const AGENT_EXAMPLE_QUESTIONS = {
       question: 'Create a bug report template with the essential fields.',
     },
   ],
-  'Deep Research': [],
 };
 
 export const KB_QA_FORCED_KB_BY_EXAMPLE_INDEX = {

@@ -53,7 +53,7 @@ export default function Pane({
   }, [tabs, tabsLen, activeId]);
 
   const isDoc = activeTab && activeTab.type === 'doc';
-  const hasDocKey = isDoc && (activeTab.docId != null || activeTab.objectId != null || !!activeTab.docTitle);
+  const hasDocKey = isDoc && (activeTab.docId != null || activeTab.objectId != null || activeTab.aiDocumentId || !!activeTab.docTitle);
   const docExt = useMemo(() => {
     if (!activeTab) return '';
     const ext = String(activeTab.docFileRight || '').trim().toLowerCase();
@@ -93,6 +93,7 @@ export default function Pane({
             <MarkdownDocViewer
               docId={activeTab.docId ?? null}
               objectId={activeTab.objectId ?? null}
+              aiDocumentId={activeTab.aiDocumentId ?? null}
               docTitle={activeTab.docTitle ?? activeTab.title ?? ''}
               docRelPath={activeTab.docRelPath ?? null}
               docSubPath={activeTab.docSubPath ?? null}
@@ -104,6 +105,7 @@ export default function Pane({
             <EmbedPdfViewer
               docId={activeTab.docId ?? null}
               objectId={activeTab.objectId ?? null}
+              aiDocumentId={activeTab.aiDocumentId ?? null}
               docTitle={activeTab.docTitle ?? activeTab.title ?? ''}
               docRelPath={activeTab.docRelPath ?? null}
               docSubPath={activeTab.docSubPath ?? null}
