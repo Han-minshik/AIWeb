@@ -3,3 +3,4 @@
 node_modules/
 venv/
 .venv/
+/back_project/secrets/
